@@ -161,8 +161,7 @@ class SIGRFramework:
         self,
         n_iterations: int = 10,
         genes_per_iter: int = 100,
-        random_seed: int = 42,
-        run_baseline: bool = True
+        random_seed: int = 42
     ) -> Dict[str, Any]:
         """
         Run the MDP-based training loop.
@@ -171,7 +170,6 @@ class SIGRFramework:
             n_iterations: Number of optimization iterations
             genes_per_iter: Number of genes to evaluate per iteration (0 = all)
             random_seed: Random seed for reproducibility
-            run_baseline: Whether to run baseline (no-KG) evaluation first (default: True)
 
         Returns:
             Best strategy found
@@ -187,11 +185,6 @@ class SIGRFramework:
         else:
             self.eval_genes = random.sample(self.task_genes, genes_per_iter)
         logger.info(f"Fixed evaluation set: {len(self.eval_genes)} genes")
-
-        # Optional: Run baseline (Phase 0, not counted in iterations)
-        if run_baseline:
-            baseline_metrics = self._run_baseline(self.eval_genes)
-            self.logger.log_baseline(baseline_metrics)
 
         for iteration in range(1, n_iterations + 1):
             print(f"\n{'='*60}")
@@ -288,8 +281,24 @@ class SIGRFramework:
         # Start logging for this iteration
         self.logger.start_iteration(iteration)
 
-        # Get current strategy from Actor (always use Actor strategy)
-        strategy = self.actor.get_strategy()
+        # Iteration 1: NO-KG baseline (no graph information)
+        # This provides a baseline to measure the value of KG information
+        if iteration == 1:
+            strategy = {
+                'edge_types': [],  # Empty = no graph information
+                'max_neighbors': 0,
+                'max_hops': 0,
+                'sampling': 'top_k',
+                'prompt_template': self._get_baseline_prompt_template(),
+                'is_baseline': True
+            }
+            logger.info("=" * 60)
+            logger.info("Iteration 1: Running NO-KG BASELINE (no graph information)")
+            logger.info("This baseline measures performance without KG context")
+            logger.info("=" * 60)
+        else:
+            # Get current strategy from Actor
+            strategy = self.actor.get_strategy()
 
         self.logger.log_strategy(strategy)
 
@@ -445,54 +454,6 @@ CONSTRAINTS:
 - Factual description only
 - This is a baseline description without knowledge graph context
 """
-
-    def _run_baseline(self, eval_genes: List[str]) -> Dict[str, float]:
-        """
-        Run baseline evaluation without KG (optional Phase 0).
-
-        This baseline uses only LLM prior knowledge without any KG context.
-        Results are NOT added to MDP history - they serve only as a reference
-        to measure the value added by KG information.
-
-        Args:
-            eval_genes: List of gene IDs to evaluate
-
-        Returns:
-            Baseline metrics dict
-        """
-        print(f"\n{'='*60}")
-        print("BASELINE PHASE (no KG)")
-        print("Measuring LLM prior knowledge only")
-        print(f"{'='*60}")
-
-        strategy = {
-            'edge_types': [],  # Empty = no graph information
-            'max_neighbors': 0,
-            'max_hops': 0,
-            'sampling': 'top_k',
-            'prompt_template': self._get_baseline_prompt_template(),
-            'is_baseline': True
-        }
-
-        logger.info("Running baseline evaluation without KG context...")
-
-        embeddings, descriptions = self._generate_embeddings(eval_genes, strategy)
-
-        if not embeddings:
-            logger.error("Baseline: No embeddings generated")
-            return {self.evaluator.primary_metric: 0.0}
-
-        metrics = self.evaluator.evaluate(embeddings)
-
-        logger.info("=" * 60)
-        logger.info(f"BASELINE RESULTS: {metrics}")
-        logger.info("This baseline measures performance without KG context")
-        logger.info("=" * 60)
-
-        print(f"Baseline {self.evaluator.primary_metric}: {metrics.get(self.evaluator.primary_metric, 0):.4f}")
-        print(f"Full metrics: {metrics}")
-
-        return metrics
 
     def _validate_and_build_strategy(self, strategy: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -767,8 +728,7 @@ CONSTRAINTS:
         genes_per_iter: int = 100,
         random_seed: int = 42,
         checkpoint_interval: int = 5,
-        resume_from: str = None,
-        run_baseline: bool = True
+        resume_from: str = None
     ) -> Dict[str, Any]:
         """
         Run training with checkpoint support.
@@ -779,7 +739,6 @@ CONSTRAINTS:
             random_seed: Random seed for reproducibility
             checkpoint_interval: Save checkpoint every N iterations
             resume_from: Path to checkpoint file to resume from
-            run_baseline: Whether to run baseline (no-KG) evaluation first (default: True)
 
         Returns:
             Best strategy found
@@ -803,11 +762,6 @@ CONSTRAINTS:
             f"Starting training: iterations {start_iteration}-{n_iterations}, "
             f"{len(self.eval_genes)} genes/iter"
         )
-
-        # Optional: Run baseline only on fresh start (not resume)
-        if run_baseline and not resume_from:
-            baseline_metrics = self._run_baseline(self.eval_genes)
-            self.logger.log_baseline(baseline_metrics)
 
         for iteration in range(start_iteration, n_iterations + 1):
             print(f"\n{'='*60}")
@@ -1007,9 +961,7 @@ def run_training(
     # Self-verification options (LLM self-critique, Constitutional AI patterns)
     enable_self_critique: bool = True,
     enable_consistency_check: bool = True,
-    enable_cot_reasoning: bool = True,
-    # Baseline option
-    run_baseline: bool = True
+    enable_cot_reasoning: bool = True
 ):
     """
     Convenience function to run SIGR training.
@@ -1034,7 +986,6 @@ def run_training(
         max_workers: Maximum concurrent LLM requests
         checkpoint_interval: Save checkpoint every N iterations (0 to disable)
         resume_from: Path to checkpoint file to resume from
-        run_baseline: Whether to run baseline (no-KG) evaluation first (default: True)
 
     Returns:
         Best strategy found
@@ -1095,14 +1046,12 @@ def run_training(
             n_iterations=n_iterations,
             genes_per_iter=genes_per_iter,
             checkpoint_interval=checkpoint_interval,
-            resume_from=resume_from,
-            run_baseline=run_baseline
+            resume_from=resume_from
         )
     else:
         return framework.train(
             n_iterations=n_iterations,
-            genes_per_iter=genes_per_iter,
-            run_baseline=run_baseline
+            genes_per_iter=genes_per_iter
         )
 
 
