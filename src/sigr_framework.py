@@ -161,7 +161,8 @@ class SIGRFramework:
         self,
         n_iterations: int = 10,
         genes_per_iter: int = 100,
-        random_seed: int = 42
+        random_seed: int = 42,
+        run_baseline: bool = True
     ) -> Dict[str, Any]:
         """
         Run the MDP-based training loop.
@@ -170,6 +171,7 @@ class SIGRFramework:
             n_iterations: Number of optimization iterations
             genes_per_iter: Number of genes to evaluate per iteration (0 = all)
             random_seed: Random seed for reproducibility
+            run_baseline: Whether to run baseline (no-KG) evaluation first (default: True)
 
         Returns:
             Best strategy found
@@ -186,9 +188,14 @@ class SIGRFramework:
             self.eval_genes = random.sample(self.task_genes, genes_per_iter)
         logger.info(f"Fixed evaluation set: {len(self.eval_genes)} genes")
 
-        for iteration in range(n_iterations):
+        # Optional: Run baseline (Phase 0, not counted in iterations)
+        if run_baseline:
+            baseline_metrics = self._run_baseline(self.eval_genes)
+            self.logger.log_baseline(baseline_metrics)
+
+        for iteration in range(1, n_iterations + 1):
             print(f"\n{'='*60}")
-            print(f"Iteration {iteration + 1}/{n_iterations}")
+            print(f"Iteration {iteration}/{n_iterations}")
             print(f"{'='*60}")
 
             # Analyze trend before iteration
@@ -281,12 +288,16 @@ class SIGRFramework:
         # Start logging for this iteration
         self.logger.start_iteration(iteration)
 
-        # Get current strategy from Actor
+        # Get current strategy from Actor (always use Actor strategy)
         strategy = self.actor.get_strategy()
+
         self.logger.log_strategy(strategy)
 
-        logger.info(f"Strategy: edge_types={strategy['edge_types']}, "
-                   f"max_neighbors={strategy['max_neighbors']}")
+        edge_types_str = strategy.get('edge_types', [])
+        if not edge_types_str:
+            edge_types_str = "NONE (baseline)"
+        logger.info(f"Strategy: edge_types={edge_types_str}, "
+                   f"max_neighbors={strategy.get('max_neighbors', 0)}")
 
         # Use fixed evaluation genes (set in train() for fair comparison)
         eval_genes = self.eval_genes
@@ -332,8 +343,8 @@ class SIGRFramework:
 
             return penalty_reward, penalty_metrics
 
-        # Log sample descriptions
-        for gene_id, desc in list(descriptions.items())[:5]:  # Log first 5
+        # Log ALL descriptions (not just samples)
+        for gene_id, desc in descriptions.items():
             self.logger.log_gene_description(gene_id, desc)
 
         # Warn if partial generation failure
@@ -413,6 +424,127 @@ class SIGRFramework:
 
         return reward, metrics
 
+    def _get_baseline_prompt_template(self) -> str:
+        """
+        Get prompt template for baseline iteration (no KG information).
+
+        This baseline uses only gene name without any graph context,
+        allowing us to measure the value added by KG information.
+
+        Returns:
+            Baseline prompt template string
+        """
+        return """Generate a CONCISE biological description (100-150 words) for gene {gene_id} ({gene_name}).
+
+Based only on the gene name and your general biological knowledge, describe what is typically known about this gene.
+
+CONSTRAINTS:
+- Target length: 100-150 words (STRICT)
+- Do NOT make predictions or judgments
+- Do NOT output classification labels
+- Factual description only
+- This is a baseline description without knowledge graph context
+"""
+
+    def _run_baseline(self, eval_genes: List[str]) -> Dict[str, float]:
+        """
+        Run baseline evaluation without KG (optional Phase 0).
+
+        This baseline uses only LLM prior knowledge without any KG context.
+        Results are NOT added to MDP history - they serve only as a reference
+        to measure the value added by KG information.
+
+        Args:
+            eval_genes: List of gene IDs to evaluate
+
+        Returns:
+            Baseline metrics dict
+        """
+        print(f"\n{'='*60}")
+        print("BASELINE PHASE (no KG)")
+        print("Measuring LLM prior knowledge only")
+        print(f"{'='*60}")
+
+        strategy = {
+            'edge_types': [],  # Empty = no graph information
+            'max_neighbors': 0,
+            'max_hops': 0,
+            'sampling': 'top_k',
+            'prompt_template': self._get_baseline_prompt_template(),
+            'is_baseline': True
+        }
+
+        logger.info("Running baseline evaluation without KG context...")
+
+        embeddings, descriptions = self._generate_embeddings(eval_genes, strategy)
+
+        if not embeddings:
+            logger.error("Baseline: No embeddings generated")
+            return {self.evaluator.primary_metric: 0.0}
+
+        metrics = self.evaluator.evaluate(embeddings)
+
+        logger.info("=" * 60)
+        logger.info(f"BASELINE RESULTS: {metrics}")
+        logger.info("This baseline measures performance without KG context")
+        logger.info("=" * 60)
+
+        print(f"Baseline {self.evaluator.primary_metric}: {metrics.get(self.evaluator.primary_metric, 0):.4f}")
+        print(f"Full metrics: {metrics}")
+
+        return metrics
+
+    def _validate_and_build_strategy(self, strategy: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate strategy parameters and build extraction strategy.
+
+        Args:
+            strategy: Raw strategy from Actor or baseline
+
+        Returns:
+            Validated extraction strategy dict
+        """
+        # Extract parameters with defaults
+        edge_types = strategy.get('edge_types', ['PPI', 'GO', 'HPO'])
+        max_neighbors = strategy.get('max_neighbors', 50)
+        sampling = strategy.get('sampling', 'top_k')
+        max_hops = strategy.get('max_hops', 2)
+
+        # Validate edge_types
+        if not isinstance(edge_types, list):
+            logger.warning(f"Invalid edge_types type: {type(edge_types)}, using default")
+            edge_types = ['PPI', 'GO', 'HPO']
+
+        valid_edge_types = {'PPI', 'GO', 'HPO', 'TRRUST', 'CellMarker', 'Reactome'}
+        invalid_types = [et for et in edge_types if et not in valid_edge_types]
+        if invalid_types:
+            logger.warning(f"Invalid edge types removed: {invalid_types}")
+            edge_types = [et for et in edge_types if et in valid_edge_types]
+
+        # Validate max_neighbors
+        if not isinstance(max_neighbors, (int, float)) or max_neighbors < 0:
+            logger.warning(f"Invalid max_neighbors: {max_neighbors}, using default 50")
+            max_neighbors = 50
+        max_neighbors = int(max_neighbors)
+
+        # Validate sampling method
+        valid_sampling = {'top_k', 'random', 'weighted'}
+        if sampling not in valid_sampling:
+            logger.warning(f"Invalid sampling method: {sampling}, using default 'top_k'")
+            sampling = 'top_k'
+
+        # Validate max_hops
+        if not isinstance(max_hops, int) or max_hops < 0 or max_hops > 3:
+            logger.warning(f"Invalid max_hops: {max_hops}, using default 2")
+            max_hops = 2
+
+        return {
+            'edge_types': edge_types,
+            'max_neighbors': max_neighbors,
+            'sampling': sampling,
+            'max_hops': max_hops
+        }
+
     def _generate_embeddings(
         self,
         gene_ids: List[str],
@@ -434,13 +566,14 @@ class SIGRFramework:
         """
         descriptions = {}
 
-        # Build extraction strategy
-        extraction_strategy = {
-            'edge_types': strategy.get('edge_types', ['PPI', 'GO', 'HPO']),
-            'max_neighbors': strategy.get('max_neighbors', 50),
-            'sampling': strategy.get('sampling', 'top_k'),
-            'max_hops': strategy.get('max_hops', 2)
-        }
+        # Validate and build extraction strategy
+        extraction_strategy = self._validate_and_build_strategy(strategy)
+
+        # Log strategy mode
+        if not extraction_strategy['edge_types']:
+            logger.info("Extraction mode: BASELINE (no graph information)")
+        else:
+            logger.info(f"Extraction mode: NORMAL with edge_types={extraction_strategy['edge_types']}")
 
         # Phase 1: Generate all descriptions using LLM (multi-threaded)
         logger.info(f"Phase 1: Generating descriptions for {len(gene_ids)} genes (workers={self.max_workers})...")
@@ -455,12 +588,13 @@ class SIGRFramework:
                     kg=self.kg
                 )
 
-                # Generate description
+                # Generate description with strategy parameters
                 description = self.generator.generate(
                     gene_id=gene_id,
                     subgraph=subgraph,
                     prompt_template=strategy.get('prompt_template', ''),
-                    kg=self.kg
+                    kg=self.kg,
+                    strategy=strategy  # Pass full strategy for description_length, focus_keywords, etc.
                 )
                 return (gene_id, description, None)
             except Exception as e:
@@ -633,7 +767,8 @@ class SIGRFramework:
         genes_per_iter: int = 100,
         random_seed: int = 42,
         checkpoint_interval: int = 5,
-        resume_from: str = None
+        resume_from: str = None,
+        run_baseline: bool = True
     ) -> Dict[str, Any]:
         """
         Run training with checkpoint support.
@@ -644,14 +779,16 @@ class SIGRFramework:
             random_seed: Random seed for reproducibility
             checkpoint_interval: Save checkpoint every N iterations
             resume_from: Path to checkpoint file to resume from
+            run_baseline: Whether to run baseline (no-KG) evaluation first (default: True)
 
         Returns:
             Best strategy found
         """
-        start_iteration = 0
+        start_iteration = 1
 
         if resume_from:
             start_iteration = self.load_checkpoint(resume_from)
+            start_iteration = max(1, start_iteration)  # Ensure at least 1
         else:
             random.seed(random_seed)
             np.random.seed(random_seed)
@@ -663,13 +800,18 @@ class SIGRFramework:
                 self.eval_genes = random.sample(self.task_genes, genes_per_iter)
 
         logger.info(
-            f"Starting training: iterations {start_iteration+1}-{n_iterations}, "
+            f"Starting training: iterations {start_iteration}-{n_iterations}, "
             f"{len(self.eval_genes)} genes/iter"
         )
 
-        for iteration in range(start_iteration, n_iterations):
+        # Optional: Run baseline only on fresh start (not resume)
+        if run_baseline and not resume_from:
+            baseline_metrics = self._run_baseline(self.eval_genes)
+            self.logger.log_baseline(baseline_metrics)
+
+        for iteration in range(start_iteration, n_iterations + 1):
             print(f"\n{'='*60}")
-            print(f"Iteration {iteration + 1}/{n_iterations}")
+            print(f"Iteration {iteration}/{n_iterations}")
             print(f"{'='*60}")
 
             # Analyze trend before iteration
@@ -729,7 +871,7 @@ class SIGRFramework:
             print(self.mdp_state.get_summary())
 
             # Save checkpoint at intervals
-            if checkpoint_interval > 0 and (iteration + 1) % checkpoint_interval == 0:
+            if checkpoint_interval > 0 and iteration % checkpoint_interval == 0:
                 self.save_checkpoint(iteration)
 
         # Save final results
@@ -865,7 +1007,9 @@ def run_training(
     # Self-verification options (LLM self-critique, Constitutional AI patterns)
     enable_self_critique: bool = True,
     enable_consistency_check: bool = True,
-    enable_cot_reasoning: bool = True
+    enable_cot_reasoning: bool = True,
+    # Baseline option
+    run_baseline: bool = True
 ):
     """
     Convenience function to run SIGR training.
@@ -890,6 +1034,7 @@ def run_training(
         max_workers: Maximum concurrent LLM requests
         checkpoint_interval: Save checkpoint every N iterations (0 to disable)
         resume_from: Path to checkpoint file to resume from
+        run_baseline: Whether to run baseline (no-KG) evaluation first (default: True)
 
     Returns:
         Best strategy found
@@ -950,12 +1095,14 @@ def run_training(
             n_iterations=n_iterations,
             genes_per_iter=genes_per_iter,
             checkpoint_interval=checkpoint_interval,
-            resume_from=resume_from
+            resume_from=resume_from,
+            run_baseline=run_baseline
         )
     else:
         return framework.train(
             n_iterations=n_iterations,
-            genes_per_iter=genes_per_iter
+            genes_per_iter=genes_per_iter,
+            run_baseline=run_baseline
         )
 
 

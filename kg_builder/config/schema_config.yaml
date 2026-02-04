@@ -91,6 +91,31 @@ pathway:
     name: str
     species: str
 
+tissue:
+  # Maps to biolink:GrossAnatomicalStructure (for GTEx)
+  is_a: anatomical entity
+  represented_as: node
+  preferred_id: gtex
+  input_label: Tissue
+  properties:
+    tissue_id: str
+    name: str
+    source_database: str
+
+protein complex:
+  # Maps to biolink:MacromolecularComplex (for CORUM)
+  is_a: biological entity
+  represented_as: node
+  preferred_id: corum
+  input_label: ProteinComplex
+  properties:
+    complex_id: str
+    name: str
+    function: str
+    subunit_count: int
+    go_ids: str
+    source_database: str
+
 # ============================================================
 # EDGE TYPES (Relationships)
 # ============================================================
@@ -210,4 +235,31 @@ pathway contains:
   source: pathway
   target: pathway
   properties:
+    source_database: str
+
+# Gene-Tissue Expression (GTEx)
+expressed in tissue:
+  # Maps to biolink:GeneToExpressionSiteAssociation
+  is_a: association
+  represented_as: edge
+  input_label: EXPRESSED_IN_TISSUE
+  source: gene
+  target: tissue
+  properties:
+    tpm: float
+    relative_expression: float
+    tissue_specificity: float
+    source_database: str
+
+# Gene-Complex Membership (CORUM)
+in complex:
+  # Maps to biolink:GeneToMacromolecularComplexAssociation
+  is_a: association
+  represented_as: edge
+  input_label: IN_COMPLEX
+  source: gene
+  target: protein complex
+  properties:
+    complex_name: str
+    subunit_count: int
     source_database: str

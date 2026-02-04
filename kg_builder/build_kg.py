@@ -5,6 +5,7 @@ Constructs a biomedical knowledge graph using BioCypher with Biolink Model ontol
 
 Usage:
     python build_kg.py [--string-threshold 700] [--output data/kg/sigr_kg.pkl]
+    python build_kg.py --include-omim --include-gtex --include-corum
 """
 
 import os
@@ -35,6 +36,9 @@ from kg_builder.adapters import (
     HPOAdapter,
     CellMarkerAdapter,
     ReactomeAdapter,
+    OMIMAdapter,
+    GTExAdapter,
+    CORUMAdapter,
 )
 
 # Configure logging
@@ -57,6 +61,9 @@ class SIGRKnowledgeGraph:
     - HPO: Phenotypes (biolink:GeneToPhenotypicFeatureAssociation)
     - CellMarker: Cell type markers (biolink:ExpressedIn)
     - Reactome: Pathway annotations (biolink:InPathway)
+    - OMIM: Disease associations (biolink:GeneToDiseaseAssociation) [optional]
+    - GTEx: Tissue expression (biolink:GeneToExpressionSiteAssociation) [optional]
+    - CORUM: Protein complex membership (biolink:GeneToMacromolecularComplexAssociation) [optional]
     """
 
     def __init__(
@@ -64,6 +71,10 @@ class SIGRKnowledgeGraph:
         data_dir: str = "data/raw",
         output_dir: str = "data/kg",
         string_threshold: int = 700,
+        include_omim: bool = False,
+        include_gtex: bool = False,
+        include_corum: bool = False,
+        gtex_tpm_threshold: float = 1.0,
     ):
         """
         Initialize the KG builder.
@@ -72,10 +83,18 @@ class SIGRKnowledgeGraph:
             data_dir: Directory containing raw data files
             output_dir: Directory for output files
             string_threshold: STRING score threshold (0-1000)
+            include_omim: Include OMIM disease associations
+            include_gtex: Include GTEx tissue expression
+            include_corum: Include CORUM protein complex data
+            gtex_tpm_threshold: TPM threshold for GTEx expression
         """
         self.data_dir = Path(data_dir)
         self.output_dir = Path(output_dir)
         self.string_threshold = string_threshold
+        self.include_omim = include_omim
+        self.include_gtex = include_gtex
+        self.include_corum = include_corum
+        self.gtex_tpm_threshold = gtex_tpm_threshold
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)

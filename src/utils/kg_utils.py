@@ -22,6 +22,10 @@ EDGE_TYPE_MAPPING = {
     'regulates': 'TRRUST',
     'expressed in': 'CellMarker',
     'in pathway': 'Reactome',
+    # New edge types
+    'gene to disease association': 'OMIM',
+    'expressed in tissue': 'GTEx',
+    'in complex': 'CORUM',
 }
 
 # Reverse mapping

@@ -3,6 +3,12 @@ Task-Specific Prompts and Edge Priorities for SIGR Actor
 
 Defines initial prompts and edge type priorities for each downstream task.
 All prompts are in English with anti-leakage constraints.
+
+Key design principles:
+1. CONCISE descriptions (100-150 words) - avoid token waste
+2. FOCUSED on downstream task-relevant features
+3. IMPLICIT signals allowed (hub gene, conserved, etc.)
+4. EXPLICIT labels forbidden (is/is not sensitive, etc.)
 """
 
 from typing import Dict, List
@@ -11,252 +17,331 @@ from typing import Dict, List
 # Task-specific edge type priorities
 # These define which edge types are most relevant for each task
 TASK_EDGE_PRIORITIES: Dict[str, List[str]] = {
-    'ppi': ['PPI', 'GO', 'Reactome', 'TRRUST'],  # Protein interactions are primary
+    'ppi': ['PPI', 'GO', 'Reactome', 'TRRUST'],  # Protein interactions
     'genetype': ['GO', 'Reactome', 'PPI', 'HPO'],  # Gene Ontology is primary
-    'phenotype': ['HPO', 'GO', 'Reactome', 'PPI'],  # Phenotype associations are primary
-    'celltype': ['CellMarker', 'GO', 'Reactome', 'PPI'],  # Cell type markers are primary
-    'dosage': ['TRRUST', 'GO', 'Reactome', 'PPI'],  # Regulatory relations are primary
+    'phenotype': ['HPO', 'GO', 'Reactome', 'PPI'],  # Phenotype associations
+    'celltype': ['CellMarker', 'GO', 'Reactome', 'PPI'],  # Cell type markers
+    'dosage': ['TRRUST', 'GO', 'Reactome', 'PPI'],  # Regulatory
     # GGI task
     'ggi': ['PPI', 'GO', 'Reactome', 'TRRUST'],  # Gene-gene interaction
     # Cell task
-    'cell': ['CellMarker', 'GO', 'Reactome', 'PPI'],  # Cell type classification
+    'cell': ['CellMarker', 'GO', 'Reactome', 'PPI'],  # Cell type
     # GeneAttribute subtasks
-    'geneattribute_dosage_sensitivity': ['TRRUST', 'GO', 'HPO', 'Reactome', 'PPI'],  # Gene essentiality + phenotype + pathway
+    'geneattribute_dosage_sensitivity': ['TRRUST', 'GO', 'HPO', 'Reactome', 'PPI'],  # Essentiality
     'geneattribute_lys4_only': ['GO', 'Reactome', 'TRRUST', 'HPO'],  # Chromatin/methylation
     'geneattribute_no_methylation': ['GO', 'Reactome', 'TRRUST', 'HPO'],  # Chromatin/methylation
     'geneattribute_bivalent': ['GO', 'Reactome', 'TRRUST', 'HPO'],  # Chromatin state
 }
 
 
-# Task-specific initial prompts
-# These are the starting prompts that will be optimized by the Actor
+# Task-specific IMPLICIT signals that should be emphasized
+# These are biological features that IMPLICITLY indicate the label without stating it directly
+TASK_IMPLICIT_SIGNALS: Dict[str, List[str]] = {
+    'ppi': [
+        'interaction partners', 'binding domain', 'protein complex',
+        'signaling hub', 'scaffold protein', 'co-localization',
+        'shared pathway', 'functional module'
+    ],
+    'genetype': [
+        'enzymatic activity', 'catalytic domain', 'binding capacity',
+        'transcription factor', 'kinase', 'receptor',
+        'transporter', 'channel protein'
+    ],
+    'phenotype': [
+        'disease association', 'clinical manifestation', 'mutation effect',
+        'loss-of-function', 'gain-of-function', 'knockout phenotype',
+        'developmental defect', 'syndrome'
+    ],
+    'celltype': [
+        'tissue-specific', 'cell-type marker', 'enriched in',
+        'lineage marker', 'differentiation', 'cluster marker',
+        'single-cell expression', 'cell identity'
+    ],
+    'dosage': [
+        'hub gene', 'highly conserved', 'essential pathway',
+        'haploinsufficiency', 'regulatory target', 'constraint',
+        'core complex', 'network centrality'
+    ],
+    'ggi': [
+        'co-expression', 'shared pathway', 'functional module',
+        'interaction network', 'regulatory cascade', 'complex member',
+        'epistatic interaction', 'synthetic lethal'
+    ],
+    'cell': [
+        'tissue-specific', 'marker gene', 'enriched expression',
+        'cell identity', 'differentiation marker', 'lineage-specific',
+        'cluster-defining', 'canonical marker'
+    ],
+    'geneattribute_dosage_sensitivity': [
+        'hub gene', 'highly connected', 'central node',
+        'highly conserved', 'evolutionary constrained', 'pLI',
+        'essential pathway', 'core complex member', 'LOEUF',
+        'regulatory target', 'transcription factor target',
+        'haploinsufficiency', 'dosage-dependent'
+    ],
+    'geneattribute_lys4_only': [
+        'H3K4me3', 'active promoter', 'housekeeping gene',
+        'constitutive expression', 'open chromatin',
+        'transcriptionally active', 'CpG island'
+    ],
+    'geneattribute_no_methylation': [
+        'unmethylated', 'CpG island', 'promoter accessibility',
+        'active transcription', 'housekeeping', 'ubiquitous expression',
+        'open chromatin state'
+    ],
+    'geneattribute_bivalent': [
+        'H3K4me3', 'H3K27me3', 'poised promoter', 'bivalent domain',
+        'developmental gene', 'Polycomb target', 'PRC2',
+        'lineage commitment', 'pluripotency', 'differentiation potential',
+        'epigenetic plasticity'
+    ],
+}
+
+
+# Task-specific initial prompts - OPTIMIZED for conciseness and task-relevance
+# Key changes: 100-150 word limit, focused on task-specific implicit signals
 TASK_INITIAL_PROMPTS: Dict[str, str] = {
-    'ppi': """Generate a biological description for gene {gene_id} ({gene_name}) to support protein-protein interaction prediction.
+    'ppi': """Generate a CONCISE description (100-150 words) for gene {gene_id} ({gene_name}) for protein interaction prediction.
 
-Knowledge Graph Information:
-- Protein Interactions: {ppi_info}
-- Biological Processes: {go_info}
-- Pathway Involvement: {pathway_info}
-- Regulatory Relations: {tf_info}
+KG Context:
+- Interactions: {ppi_info}
+- Pathways: {pathway_info}
+- Processes: {go_info}
 
-Focus on:
-- Protein domains and binding sites
-- Signaling pathway involvement
-- Known interaction partners
+FOCUS on interaction-relevant features:
+- Protein domains, binding sites
+- Known interaction partners count
+- Complex membership
+- Signaling pathway hub status
+
+Include IMPLICIT signals: "hub protein", "binding domain", "scaffold", "complex member"
+
+STRICT CONSTRAINTS:
+- Maximum 150 words
+- NO explicit predictions ("will/won't interact")
+- NO probability statements
+- Factual biological features only
+""",
+
+    'genetype': """Generate a CONCISE description (100-150 words) for gene {gene_id} ({gene_name}) for gene functional type classification.
+
+KG Context:
+- Functions: {go_info}
+- Pathways: {pathway_info}
+
+FOCUS on functional type indicators:
+- Molecular function (enzyme, receptor, transporter, etc.)
+- Catalytic/binding domains
 - Subcellular localization
+- Pathway roles
 
-IMPORTANT CONSTRAINTS:
-- Only describe known biological information
-- Do NOT make any predictions or judgments
-- Do NOT output classification labels
-- Do NOT assess probabilities or likelihood
-- Description must be factual, not speculative
+Include IMPLICIT signals: "kinase activity", "receptor function", "transcription factor", "channel protein"
+
+STRICT CONSTRAINTS:
+- Maximum 150 words
+- NO explicit type predictions
+- NO classification labels
+- Factual functional features only
 """,
 
-    'genetype': """Generate a biological description for gene {gene_id} ({gene_name}) to support gene functional type classification.
+    'phenotype': """Generate a CONCISE description (100-150 words) for gene {gene_id} ({gene_name}) for phenotype association prediction.
 
-Knowledge Graph Information:
-- Biological Processes: {go_info}
-- Molecular Functions: {function_info}
-- Pathway Involvement: {pathway_info}
+KG Context:
+- Phenotypes: {phenotype_info}
+- Processes: {go_info}
 
-Focus on:
-- Molecular function (enzymatic activity, binding capability, etc.)
-- Biological processes involved
-- Metabolic pathway roles
-- Cellular component localization
-
-IMPORTANT CONSTRAINTS:
-- Only describe functional information
-- Do NOT output classification labels
-- Do NOT predict gene type categories
-- Description must be factual, not speculative
-""",
-
-    'phenotype': """Generate a biological description for gene {gene_id} ({gene_name}) to support gene-phenotype association prediction.
-
-Knowledge Graph Information:
-- Phenotype Associations: {phenotype_info}
-- Disease Links: {disease_info}
-- Biological Processes: {go_info}
-
-Focus on:
+FOCUS on phenotype-relevant features:
 - Known disease associations
-- Mutation-induced phenotypes
-- Clinical symptom correlations
-- Phenotypic features in model organisms
+- Mutation effects in model organisms
+- Clinical manifestations
+- Developmental roles
 
-IMPORTANT CONSTRAINTS:
-- Only describe known information
-- Do NOT predict unknown phenotype associations
-- Do NOT output labels or categories
-- Description must be factual, not speculative
+Include IMPLICIT signals: "disease-associated", "knockout phenotype", "syndrome", "developmental defect"
+
+STRICT CONSTRAINTS:
+- Maximum 150 words
+- NO explicit phenotype predictions
+- NO probability statements
+- Factual phenotypic features only
 """,
 
-    'celltype': """Generate a biological description for gene {gene_id} ({gene_name}) to support cell type marker prediction.
+    'celltype': """Generate a CONCISE description (100-150 words) for gene {gene_id} ({gene_name}) for cell type marker prediction.
 
-Knowledge Graph Information:
-- Cell Type Markers: {celltype_info}
-- Tissue Expression: {tissue_info}
-- Biological Processes: {go_info}
+KG Context:
+- Cell markers: {celltype_info}
+- Expression: {tissue_info}
+- Processes: {go_info}
 
-Focus on:
+FOCUS on cell-type relevant features:
 - Tissue-specific expression patterns
-- Cell differentiation markers
-- Developmental stage expression
-- Single-cell expression profiles
+- Enrichment in specific cell populations
+- Differentiation markers
+- Lineage associations
 
-IMPORTANT CONSTRAINTS:
-- Only describe expression patterns
-- Do NOT predict whether gene is a marker for specific cell types
-- Do NOT output classification labels
-- Description must be factual, not speculative
+Include IMPLICIT signals: "enriched in", "tissue-specific", "marker for", "lineage-defining"
+
+STRICT CONSTRAINTS:
+- Maximum 150 words
+- NO explicit marker predictions
+- NO cell type labels
+- Factual expression features only
 """,
 
-    'dosage': """Generate a biological description for gene {gene_id} ({gene_name}) to support dosage sensitivity prediction.
+    'dosage': """Generate a CONCISE description (100-150 words) for gene {gene_id} ({gene_name}) for dosage sensitivity prediction.
 
-Knowledge Graph Information:
-- Regulatory Relations: {tf_info}
-- Biological Processes: {go_info}
-- Interaction Network: {ppi_info}
+KG Context:
+- Regulatory: {tf_info}
+- Processes: {go_info}
+- Interactions: {ppi_info}
 
-Focus on:
-- Essentiality (whether required for survival)
-- Position in regulatory networks
-- Genomic constraint level
-- Haploinsufficiency evidence
+FOCUS on dosage-relevant features:
+- Network centrality (hub status)
+- Conservation level
+- Essential pathway membership
+- Regulatory network position
 
-IMPORTANT CONSTRAINTS:
-- Only describe gene characteristics
-- Do NOT predict sensitivity categories
-- Do NOT output classification labels
-- Description must be factual, not speculative
+Include IMPLICIT signals: "hub gene", "highly conserved", "essential", "haploinsufficiency context"
+
+STRICT CONSTRAINTS:
+- Maximum 150 words
+- NO explicit sensitivity predictions
+- NO dosage labels
+- Factual essentiality features only
 """,
 
-    # GGI task
-    'ggi': """Generate a biological description for gene {gene_id} ({gene_name}) to support gene-gene interaction prediction.
+    'ggi': """Generate a CONCISE description (100-150 words) for gene {gene_id} ({gene_name}) for gene-gene interaction prediction.
 
-Knowledge Graph Information:
-- Protein Interactions: {ppi_info}
-- Biological Processes: {go_info}
-- Pathway Involvement: {pathway_info}
-- Regulatory Relations: {tf_info}
+KG Context:
+- Interactions: {ppi_info}
+- Pathways: {pathway_info}
+- Regulatory: {tf_info}
 
-Focus on:
-- Known interaction partners and pathways
+FOCUS on interaction-relevant features:
+- Known interaction network position
 - Co-expression patterns
-- Shared biological processes
+- Shared pathway membership
 - Regulatory relationships
 
-IMPORTANT CONSTRAINTS:
-- Only describe known biological information
-- Do NOT predict specific interactions
-- Do NOT output classification labels
-- Description must be factual, not speculative
+Include IMPLICIT signals: "co-expressed with", "shared pathway", "functional module", "regulatory cascade"
+
+STRICT CONSTRAINTS:
+- Maximum 150 words
+- NO explicit interaction predictions
+- NO classification labels
+- Factual interaction features only
 """,
 
-    # Cell task
-    'cell': """Generate a biological description for gene {gene_id} ({gene_name}) to support cell type classification.
+    'cell': """Generate a CONCISE description (100-150 words) for gene {gene_id} ({gene_name}) for cell type classification.
 
-Knowledge Graph Information:
-- Cell Type Markers: {celltype_info}
-- Biological Processes: {go_info}
-- Protein Interactions: {ppi_info}
+KG Context:
+- Cell markers: {celltype_info}
+- Processes: {go_info}
+- Interactions: {ppi_info}
 
-Focus on:
-- Cell type specific expression patterns
+FOCUS on cell-type relevant features:
+- Expression specificity
 - Marker gene characteristics
 - Tissue distribution
-- Developmental expression
+- Cell identity associations
 
-IMPORTANT CONSTRAINTS:
-- Only describe expression patterns
-- Do NOT predict cell type associations
-- Do NOT output classification labels
-- Description must be factual, not speculative
+Include IMPLICIT signals: "cell-type specific", "marker gene", "enriched expression", "cluster-defining"
+
+STRICT CONSTRAINTS:
+- Maximum 150 words
+- NO explicit cell type predictions
+- NO classification labels
+- Factual expression features only
 """,
 
-    # GeneAttribute subtasks
-    'geneattribute_dosage_sensitivity': """Describe the biological characteristics of gene {gene_name} ({gene_id}).
+    'geneattribute_dosage_sensitivity': """Generate a CONCISE description (100-150 words) for gene {gene_id} ({gene_name}) for dosage sensitivity prediction.
 
-Available information:
+KG Context:
 - Regulatory network: {tf_info}
 - Biological processes: {go_info}
-- Phenotype associations: {phenotype_info}
-- Pathway involvement: {pathway_info}
-- Protein interactions: {ppi_info}
+- Phenotypes: {phenotype_info}
+- Pathways: {pathway_info}
+- Interactions: {ppi_info}
 
-Write a natural, flowing description that covers:
-- Evidence of gene essentiality or functional importance
-- Position in regulatory and interaction networks
-- Known phenotypic consequences of gene perturbation
-- Evolutionary constraint or conservation evidence
+FOCUS on dosage sensitivity indicators:
+- Network centrality (hub gene status, interaction count)
+- Evolutionary conservation (constraint scores context)
+- Essential pathway membership
+- Regulatory target complexity
+- Haploinsufficiency-related features
 
-CONSTRAINTS:
-- Use factual information only
-- DO NOT predict dosage sensitivity
-- DO NOT output classification labels
-- Vary your writing style based on available data
+Include IMPLICIT signals: "hub gene", "highly conserved", "essential pathway", "core complex", "regulatory target"
+
+STRICT CONSTRAINTS:
+- Maximum 150 words
+- NO explicit predictions ("is/is not dosage-sensitive")
+- NO probability or confidence statements
+- Focus on RELEVANT features that indicate essentiality
 """,
 
-    'geneattribute_lys4_only': """Generate a biological description for gene {gene_id} ({gene_name}) to support chromatin state prediction.
+    'geneattribute_lys4_only': """Generate a CONCISE description (100-150 words) for gene {gene_id} ({gene_name}) for H3K4me3-only chromatin state prediction.
 
-Knowledge Graph Information:
-- Biological Processes: {go_info}
-- Regulatory Relations: {tf_info}
-- Phenotype Associations: {phenotype_info}
+KG Context:
+- Processes: {go_info}
+- Regulatory: {tf_info}
+- Phenotypes: {phenotype_info}
 
-Focus on:
-- Transcriptional regulation patterns
-- Epigenetic context
-- Gene expression characteristics
-- Chromatin accessibility indicators
+FOCUS on active chromatin indicators:
+- Transcriptional activity level
+- Housekeeping gene characteristics
+- Promoter features
+- Expression breadth
 
-IMPORTANT CONSTRAINTS:
-- Only describe gene characteristics
-- Do NOT predict methylation states
-- Do NOT output classification labels
-- Description must be factual, not speculative
+Include IMPLICIT signals: "constitutively expressed", "active promoter", "housekeeping", "ubiquitous expression"
+
+STRICT CONSTRAINTS:
+- Maximum 150 words
+- NO explicit chromatin state predictions
+- NO methylation labels
+- Factual transcriptional features only
 """,
 
-    'geneattribute_no_methylation': """Generate a biological description for gene {gene_id} ({gene_name}) to support chromatin state prediction.
+    'geneattribute_no_methylation': """Generate a CONCISE description (100-150 words) for gene {gene_id} ({gene_name}) for unmethylated chromatin state prediction.
 
-Knowledge Graph Information:
-- Biological Processes: {go_info}
-- Regulatory Relations: {tf_info}
-- Phenotype Associations: {phenotype_info}
+KG Context:
+- Processes: {go_info}
+- Regulatory: {tf_info}
+- Phenotypes: {phenotype_info}
 
-Focus on:
-- Transcriptional activity patterns
-- Promoter characteristics
-- Expression regulation
-- Chromatin environment
+FOCUS on unmethylated promoter indicators:
+- CpG island association
+- Promoter accessibility
+- Constitutive expression patterns
+- Open chromatin features
 
-IMPORTANT CONSTRAINTS:
-- Only describe gene characteristics
-- Do NOT predict methylation states
-- Do NOT output classification labels
-- Description must be factual, not speculative
+Include IMPLICIT signals: "CpG island", "open chromatin", "active transcription", "accessible promoter"
+
+STRICT CONSTRAINTS:
+- Maximum 150 words
+- NO explicit methylation predictions
+- NO chromatin state labels
+- Factual promoter features only
 """,
 
-    'geneattribute_bivalent': """Generate a biological description for gene {gene_id} ({gene_name}) to support bivalent chromatin state prediction.
+    'geneattribute_bivalent': """Generate a CONCISE description (100-150 words) for gene {gene_id} ({gene_name}) for bivalent chromatin state prediction.
 
-Knowledge Graph Information:
-- Biological Processes: {go_info}
-- Regulatory Relations: {tf_info}
-- Phenotype Associations: {phenotype_info}
+KG Context:
+- Processes: {go_info}
+- Regulatory: {tf_info}
+- Phenotypes: {phenotype_info}
 
-Focus on:
+FOCUS on bivalent domain indicators:
 - Developmental gene characteristics
-- Pluripotency associations
-- Transcriptional poising
 - Lineage commitment roles
+- Pluripotency associations
+- Polycomb regulation context
 
-IMPORTANT CONSTRAINTS:
-- Only describe gene characteristics
-- Do NOT predict chromatin states
-- Do NOT output classification labels
-- Description must be factual, not speculative
+Include IMPLICIT signals: "developmental gene", "lineage commitment", "Polycomb target", "differentiation potential", "poised"
+
+STRICT CONSTRAINTS:
+- Maximum 150 words
+- NO explicit bivalent predictions
+- NO chromatin state labels ("is/is not bivalent")
+- Factual developmental features only
 """,
 }
 
@@ -269,6 +354,11 @@ Current Strategy:
 - Max hops: {max_hops}
 - Sampling method: {sampling}
 - Max neighbors: {max_neighbors}
+- Description length: {description_length}
+- Edge weights: {edge_weights}
+- Neighbors per type: {neighbors_per_type}
+- Include statistics: {include_statistics}
+- Focus keywords: {focus_keywords}
 
 Current Reward: {reward:.4f}
 
@@ -286,10 +376,24 @@ Based on the feedback and trend analysis, analyze:
 3. How should the strategy be modified to improve performance?
 4. Given the trend, should we explore new directions or fine-tune the current approach?
 
-Available edge types: PPI, GO, HPO, TRRUST, CellMarker, Reactome
-Available sampling methods: top_k, random, weighted
-Max hops range: 1-3
-Max neighbors range: 10-200
+Available parameters:
+- Edge types: PPI, GO, HPO, TRRUST, CellMarker, Reactome
+- Sampling: top_k, random, weighted
+- Max hops: 1-3
+- Max neighbors: 10-200
+- Description length: short (50-100 words), medium (100-150 words), long (150-250 words)
+- Edge weights: 0.0-1.0 per edge type (higher = more important in formatting)
+- Neighbors per type: 10-200 per edge type (fine-grained control)
+- Include statistics: true/false (whether to include counts, scores in description)
+- Focus keywords: list of terms to emphasize (e.g., "hub", "conserved", "essential")
+
+Edge type descriptions:
+- PPI: Protein-protein interactions (STRING)
+- GO: Gene Ontology biological processes
+- HPO: Human Phenotype Ontology associations
+- TRRUST: Transcription factor regulatory relations
+- CellMarker: Cell type marker annotations
+- Reactome: Biological pathway membership
 
 Output a JSON with the updated strategy:
 {{
@@ -297,6 +401,11 @@ Output a JSON with the updated strategy:
     "max_hops": int,
     "sampling": "top_k" | "random" | "weighted",
     "max_neighbors": int,
+    "description_length": "short" | "medium" | "long",
+    "edge_weights": {{"PPI": 1.0, "GO": 0.8, ...}},
+    "neighbors_per_type": {{"PPI": 30, "GO": 20, ...}},
+    "include_statistics": true | false,
+    "focus_keywords": ["keyword1", "keyword2", ...],
     "reasoning": "explanation of changes"
 }}
 """
@@ -377,12 +486,22 @@ Trend Analysis:
             for e in effective[:3]:
                 trend_section += f"  - {e.get('strategy', {})} (improvement: {e.get('improvement', 0):.4f})\n"
 
+    # Format extended parameters
+    edge_weights = strategy_dict.get('edge_weights', {})
+    neighbors_per_type = strategy_dict.get('neighbors_per_type', {})
+    focus_keywords = strategy_dict.get('focus_keywords', [])
+
     return REFLECTION_PROMPT_TEMPLATE.format(
         task_name=task_name,
         edge_types=strategy_dict.get('edge_types', []),
         max_hops=strategy_dict.get('max_hops', 2),
         sampling=strategy_dict.get('sampling', 'top_k'),
         max_neighbors=strategy_dict.get('max_neighbors', 50),
+        description_length=strategy_dict.get('description_length', 'medium'),
+        edge_weights=edge_weights if edge_weights else 'Not set (using defaults)',
+        neighbors_per_type=neighbors_per_type if neighbors_per_type else 'Not set (using max_neighbors)',
+        include_statistics=strategy_dict.get('include_statistics', True),
+        focus_keywords=focus_keywords if focus_keywords else 'Not set',
         reward=reward,
         trend_analysis_section=trend_section,
         feedback=feedback,
@@ -453,6 +572,11 @@ Output format:
     "max_hops": int,
     "sampling": "top_k" | "random" | "weighted",
     "max_neighbors": int,
+    "description_length": "short" | "medium" | "long",
+    "edge_weights": {{}},
+    "neighbors_per_type": {{}},
+    "include_statistics": true | false,
+    "focus_keywords": [...],
     "reasoning": "final reasoning after self-critique"
 }}
 ```
@@ -492,6 +616,11 @@ Output format:
     "max_hops": int,
     "sampling": "top_k" | "random" | "weighted",
     "max_neighbors": int,
+    "description_length": "short" | "medium" | "long",
+    "edge_weights": {{}},
+    "neighbors_per_type": {{}},
+    "include_statistics": true | false,
+    "focus_keywords": [...],
     "reasoning": "explanation"
 }}
 ```
@@ -531,6 +660,11 @@ Current Strategy:
 - Max hops: {max_hops}
 - Sampling: {sampling}
 - Max neighbors: {max_neighbors}
+- Description length: {description_length}
+- Edge weights: {edge_weights}
+- Neighbors per type: {neighbors_per_type}
+- Include statistics: {include_statistics}
+- Focus keywords: {focus_keywords}
 
 Based on Steps 1-3, propose improvements:
 - What specific parameter(s) to change?
@@ -538,11 +672,16 @@ Based on Steps 1-3, propose improvements:
 - Expected effect of the change?
 
 ## STEP 5: OUTPUT STRATEGY
-Available options:
+Available parameters:
 - Edge types: PPI, GO, HPO, TRRUST, CellMarker, Reactome
 - Sampling: top_k, random, weighted
 - Max hops: 1-3
 - Max neighbors: 10-200
+- Description length: short (50-100 words), medium (100-150 words), long (150-250 words)
+- Edge weights: 0.0-1.0 per edge type
+- Neighbors per type: 10-200 per edge type
+- Include statistics: true/false
+- Focus keywords: list of terms to emphasize
 
 ```json
 {{
@@ -550,6 +689,11 @@ Available options:
     "max_hops": int,
     "sampling": "top_k" | "random" | "weighted",
     "max_neighbors": int,
+    "description_length": "short" | "medium" | "long",
+    "edge_weights": {{"PPI": 1.0, ...}},
+    "neighbors_per_type": {{"PPI": 30, ...}},
+    "include_statistics": true | false,
+    "focus_keywords": [...],
     "reasoning": "Summary of your Step 1-4 analysis"
 }}
 ```
@@ -652,6 +796,7 @@ def get_reflection_cot_prompt(
         history_str += f"\nIteration {i+1} [{effect}]:\n"
         history_str += f"  - Edge types: {item['strategy'].get('edge_types', [])}\n"
         history_str += f"  - Max neighbors: {item['strategy'].get('max_neighbors', 50)}\n"
+        history_str += f"  - Description length: {item['strategy'].get('description_length', 'medium')}\n"
         history_str += f"  - Reward: {item['reward']:.4f}\n"
         history_str += f"  - Key feedback: {item['feedback'][:150]}...\n"
 
@@ -670,12 +815,22 @@ Reason: {trend_analysis.get('action_reason', 'N/A')}
     else:
         trend_section = "No trend data available (insufficient history)."
 
+    # Format extended parameters
+    edge_weights = strategy_dict.get('edge_weights', {})
+    neighbors_per_type = strategy_dict.get('neighbors_per_type', {})
+    focus_keywords = strategy_dict.get('focus_keywords', [])
+
     return REFLECTION_COT_PROMPT_TEMPLATE.format(
         task_name=task_name,
         edge_types=strategy_dict.get('edge_types', []),
         max_hops=strategy_dict.get('max_hops', 2),
         sampling=strategy_dict.get('sampling', 'top_k'),
         max_neighbors=strategy_dict.get('max_neighbors', 50),
+        description_length=strategy_dict.get('description_length', 'medium'),
+        edge_weights=edge_weights if edge_weights else 'Not set',
+        neighbors_per_type=neighbors_per_type if neighbors_per_type else 'Not set',
+        include_statistics=strategy_dict.get('include_statistics', True),
+        focus_keywords=focus_keywords if focus_keywords else 'Not set',
         reward=reward,
         feedback=feedback,
         history=history_str,

@@ -25,10 +25,11 @@ def extract_subgraph(
     Args:
         gene_id: The central gene symbol
         strategy: Strategy dictionary with:
-            - edge_types: List of edge types to include
+            - edge_types: List of edge types to include (empty = baseline mode)
             - max_hops: Maximum depth of exploration
             - sampling: Sampling method ('top_k', 'random', 'weighted')
             - max_neighbors: Maximum neighbors per edge type
+            - neighbors_per_type: Fine-grained neighbor limits per edge type (optional)
         kg: The full knowledge graph
 
     Returns:
@@ -46,15 +47,25 @@ def extract_subgraph(
     max_hops = strategy.get('max_hops', 1)
     sampling = strategy.get('sampling', 'top_k')
     max_neighbors = strategy.get('max_neighbors', 50)
+    neighbors_per_type = strategy.get('neighbors_per_type', {})
+
+    # BASELINE MODE: If edge_types is empty, return only the center node
+    # This is used for iteration 0 to measure performance without KG info
+    if not edge_types:
+        logger.debug(f"Baseline mode for {gene_id}: returning empty subgraph (no edges)")
+        return subgraph
 
     # Track visited nodes to avoid duplicates
     visited = {gene_id}
 
     # First hop: get direct neighbors
     for edge_type in edge_types:
+        # Use per-type neighbor limit if specified, otherwise use global max_neighbors
+        effective_max = neighbors_per_type.get(edge_type, max_neighbors)
+
         neighbors = get_neighbors(
             kg, gene_id, edge_type,
-            max_count=max_neighbors,
+            max_count=effective_max,
             method=sampling
         )
 
@@ -71,12 +82,15 @@ def extract_subgraph(
 
     # Multi-hop expansion if needed
     if max_hops > 1:
+        # Use gentler decay factor instead of halving
+        HOP_DECAY_FACTOR = 0.7
+        decayed_neighbors = max(int(max_neighbors * HOP_DECAY_FACTOR), 10)
         expand_subgraph(
             subgraph, kg, gene_id,
             edge_types=edge_types,
             max_hops=max_hops - 1,
             sampling=sampling,
-            max_neighbors=max_neighbors // 2,  # Reduce neighbors for deeper hops
+            max_neighbors=decayed_neighbors,
             visited=visited
         )
 
@@ -130,13 +144,18 @@ def expand_subgraph(
         visited.add(node)
 
         for edge_type in edge_types:
-            # Only expand PPI edges in multi-hop (GO/HPO don't chain well)
-            if edge_type != 'PPI':
+            # Edge types that can be expanded in multi-hop
+            # PPI, TRRUST, and CORUM are chainable (gene-to-gene relationships)
+            # GO/HPO/CellMarker/Reactome/OMIM/GTEx are terminal (gene-to-annotation)
+            MULTI_HOP_EDGE_TYPES = {'PPI', 'TRRUST', 'CORUM'}
+            if edge_type not in MULTI_HOP_EDGE_TYPES:
                 continue
 
+            # Use more conservative neighbor count division
+            effective_max = max(max_neighbors // max(len(gene_frontier), 1), 5)
             neighbors = get_neighbors(
                 kg, node, edge_type,
-                max_count=max_neighbors // len(gene_frontier) if gene_frontier else max_neighbors,
+                max_count=effective_max,
                 method=sampling
             )
 
@@ -153,14 +172,16 @@ def expand_subgraph(
                 # Add edge
                 subgraph.add_edge(node, neighbor_id, edge_type=edge_type, **edge_data)
 
-    # Recurse for more hops
+    # Recurse for more hops with gentler decay
     if max_hops > 1:
+        HOP_DECAY_FACTOR = 0.7
+        decayed_neighbors = max(int(max_neighbors * HOP_DECAY_FACTOR), 10)
         expand_subgraph(
             subgraph, kg, center_gene,
             edge_types=edge_types,
             max_hops=max_hops - 1,
             sampling=sampling,
-            max_neighbors=max_neighbors // 2,
+            max_neighbors=decayed_neighbors,
             visited=visited
         )
 

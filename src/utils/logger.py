@@ -55,6 +55,26 @@ class SIGRLogger:
         logger.info(f"Run ID: {self.run_id}")
         logger.info(f"Log directory: {self.log_dir}")
 
+    def log_baseline(self, metrics: Dict[str, float]):
+        """
+        Log baseline (no-KG) evaluation results.
+
+        Baseline is separate from iterations and serves as a reference
+        to measure the value added by KG information.
+
+        Args:
+            metrics: Dictionary of baseline evaluation metrics
+        """
+        baseline_file = self.log_dir / "baseline.json"
+        with open(baseline_file, 'w') as f:
+            json.dump({
+                'metrics': metrics,
+                'timestamp': datetime.now().isoformat(),
+                'description': 'Baseline evaluation without KG context'
+            }, f, indent=2)
+
+        logger.info(f"Baseline metrics saved to {baseline_file}")
+
     def start_iteration(self, iteration: int):
         """
         Start a new iteration.

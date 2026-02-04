@@ -15,6 +15,7 @@ from typing import List, Literal, Optional, Dict, Any
 logger = logging.getLogger(__name__)
 
 SamplingMethod = Literal['top_k', 'random', 'weighted']
+DescriptionLength = Literal['short', 'medium', 'long']
 
 
 @dataclass
@@ -22,12 +23,35 @@ class StrategyConfig:
     """Configuration for KG extraction and text generation strategy.
 
     This represents the "Action" in the MDP formulation.
+
+    Parameters:
+        edge_types: List of edge types to include in subgraph extraction
+        max_hops: Maximum depth of graph traversal (1-3)
+        sampling: Sampling method for neighbors (top_k, random, weighted)
+        max_neighbors: Global maximum neighbors per edge type
+
+        # New extended parameters
+        description_length: Target description length (short=50-100, medium=100-150, long=150-250 words)
+        edge_weights: Per-edge-type importance weights for formatting priority
+        neighbors_per_type: Fine-grained neighbor limits per edge type
+        include_statistics: Whether to include statistical summaries in description
+        focus_keywords: Keywords to emphasize in the description
+
+        prompt_template: LLM prompt template
+        reasoning: LLM's reasoning for this strategy
     """
-    # KG extraction parameters
+    # KG extraction parameters (existing)
     edge_types: List[str] = field(default_factory=lambda: ['PPI', 'GO', 'HPO'])
     max_hops: int = 2
     sampling: SamplingMethod = 'top_k'
     max_neighbors: int = 50
+
+    # Extended parameters (new)
+    description_length: DescriptionLength = 'medium'  # short=50-100, medium=100-150, long=150-250 words
+    edge_weights: Dict[str, float] = field(default_factory=dict)  # e.g., {'PPI': 1.0, 'GO': 0.8}
+    neighbors_per_type: Dict[str, int] = field(default_factory=dict)  # e.g., {'PPI': 30, 'GO': 20}
+    include_statistics: bool = True  # Include counts, scores, etc.
+    focus_keywords: List[str] = field(default_factory=list)  # e.g., ['hub', 'conserved']
 
     # Text generation parameters
     prompt_template: str = ""
@@ -44,11 +68,21 @@ class StrategyConfig:
         """Create from dictionary."""
         # Filter to valid fields only
         valid_fields = {
-            'edge_types', 'max_hops', 'sampling',
-            'max_neighbors', 'prompt_template', 'reasoning'
+            'edge_types', 'max_hops', 'sampling', 'max_neighbors',
+            'description_length', 'edge_weights', 'neighbors_per_type',
+            'include_statistics', 'focus_keywords',
+            'prompt_template', 'reasoning'
         }
         filtered_data = {k: v for k, v in data.items() if k in valid_fields}
         return cls(**filtered_data)
+
+
+# Description length word count ranges
+DESCRIPTION_LENGTH_WORDS = {
+    'short': (50, 100),
+    'medium': (100, 150),
+    'long': (150, 250),
+}
 
 
 class Strategy:
@@ -59,10 +93,15 @@ class Strategy:
     """
 
     # Valid edge types in the KG
-    VALID_EDGE_TYPES = {'PPI', 'GO', 'HPO', 'TRRUST', 'CellMarker', 'Reactome'}
+    VALID_EDGE_TYPES = {
+        'PPI', 'GO', 'HPO', 'TRRUST', 'CellMarker', 'Reactome'
+    }
 
     # Valid sampling methods
     VALID_SAMPLING = {'top_k', 'random', 'weighted'}
+
+    # Valid description lengths
+    VALID_DESCRIPTION_LENGTHS = {'short', 'medium', 'long'}
 
     # Parameter constraints
     MIN_HOPS = 1
@@ -85,6 +124,29 @@ class Strategy:
         # Validate sampling method
         if self.config.sampling not in self.VALID_SAMPLING:
             raise ValueError(f"Invalid sampling method: {self.config.sampling}")
+
+        # Validate description length
+        if self.config.description_length not in self.VALID_DESCRIPTION_LENGTHS:
+            logger.warning(f"Invalid description_length: {self.config.description_length}, using 'medium'")
+            self.config.description_length = 'medium'
+
+        # Validate edge_weights (values should be 0.0-1.0)
+        if self.config.edge_weights:
+            for edge_type, weight in self.config.edge_weights.items():
+                if edge_type not in self.VALID_EDGE_TYPES:
+                    logger.warning(f"Invalid edge type in edge_weights: {edge_type}")
+                if not 0.0 <= weight <= 1.0:
+                    self.config.edge_weights[edge_type] = max(0.0, min(1.0, weight))
+
+        # Validate neighbors_per_type
+        if self.config.neighbors_per_type:
+            for edge_type, count in self.config.neighbors_per_type.items():
+                if edge_type not in self.VALID_EDGE_TYPES:
+                    logger.warning(f"Invalid edge type in neighbors_per_type: {edge_type}")
+                if not self.MIN_NEIGHBORS <= count <= self.MAX_NEIGHBORS:
+                    self.config.neighbors_per_type[edge_type] = max(
+                        self.MIN_NEIGHBORS, min(count, self.MAX_NEIGHBORS)
+                    )
 
         # Validate numeric constraints
         if not (self.MIN_HOPS <= self.config.max_hops <= self.MAX_HOPS):
@@ -265,6 +327,42 @@ class Strategy:
                     data['sampling'] = method
                     break
 
+        # Extract description_length
+        desc_len_patterns = [
+            r'description[_\s]?length[:\s]+["\']?(short|medium|long)["\']?',
+            r'(?:use|prefer|set)\s+(short|medium|long)\s+description',
+        ]
+        for pattern in desc_len_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                data['description_length'] = match.group(1).lower()
+                break
+
+        # Extract include_statistics
+        stats_patterns = [
+            r'include[_\s]?statistics[:\s]+(true|false)',
+            r'statistics[:\s]+(true|false|yes|no)',
+        ]
+        for pattern in stats_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                val = match.group(1).lower()
+                data['include_statistics'] = val in ('true', 'yes')
+                break
+
+        # Extract focus_keywords
+        keywords_patterns = [
+            r'focus[_\s]?keywords?[:\s]+\[([^\]]+)\]',
+            r'keywords?[:\s]+\[([^\]]+)\]',
+        ]
+        for pattern in keywords_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                kw_str = match.group(1)
+                keywords = [kw.strip().strip('"\'') for kw in kw_str.split(',')]
+                data['focus_keywords'] = [kw for kw in keywords if kw]
+                break
+
         # Extract reasoning if present
         reasoning_patterns = [
             r'reasoning[:\s]+["\']?(.+?)["\']?(?:\n|$)',
@@ -323,6 +421,44 @@ class Strategy:
         if 'sampling' in data:
             sampling = str(data['sampling']).lower()
             validated['sampling'] = sampling if sampling in cls.VALID_SAMPLING else 'top_k'
+
+        # Validate description_length
+        if 'description_length' in data:
+            desc_len = str(data['description_length']).lower()
+            validated['description_length'] = desc_len if desc_len in cls.VALID_DESCRIPTION_LENGTHS else 'medium'
+
+        # Validate edge_weights
+        if 'edge_weights' in data and isinstance(data['edge_weights'], dict):
+            validated['edge_weights'] = {}
+            for edge_type, weight in data['edge_weights'].items():
+                if edge_type in cls.VALID_EDGE_TYPES:
+                    try:
+                        w = float(weight)
+                        validated['edge_weights'][edge_type] = max(0.0, min(1.0, w))
+                    except (ValueError, TypeError):
+                        pass
+
+        # Validate neighbors_per_type
+        if 'neighbors_per_type' in data and isinstance(data['neighbors_per_type'], dict):
+            validated['neighbors_per_type'] = {}
+            for edge_type, count in data['neighbors_per_type'].items():
+                if edge_type in cls.VALID_EDGE_TYPES:
+                    try:
+                        c = int(count)
+                        validated['neighbors_per_type'][edge_type] = max(cls.MIN_NEIGHBORS, min(c, cls.MAX_NEIGHBORS))
+                    except (ValueError, TypeError):
+                        pass
+
+        # Validate include_statistics
+        if 'include_statistics' in data:
+            validated['include_statistics'] = bool(data['include_statistics'])
+
+        # Validate focus_keywords
+        if 'focus_keywords' in data:
+            if isinstance(data['focus_keywords'], list):
+                validated['focus_keywords'] = [str(kw).strip()[:50] for kw in data['focus_keywords'][:10]]
+            elif isinstance(data['focus_keywords'], str):
+                validated['focus_keywords'] = [kw.strip()[:50] for kw in data['focus_keywords'].split(',')][:10]
 
         # Preserve reasoning
         if 'reasoning' in data and isinstance(data['reasoning'], str):

@@ -13,6 +13,9 @@ Adapters:
 - HPOAdapter: Gene-phenotype associations
 - CellMarkerAdapter: Cell type marker genes
 - ReactomeAdapter: Pathway annotations and hierarchy
+- OMIMAdapter: Gene-disease associations (new)
+- GTExAdapter: Tissue-specific expression (new)
+- CORUMAdapter: Protein complex membership (new)
 """
 
 from .hgnc_adapter import HGNCAdapter
@@ -22,6 +25,9 @@ from .go_adapter import GOAdapter
 from .hpo_adapter import HPOAdapter
 from .cellmarker_adapter import CellMarkerAdapter
 from .reactome_adapter import ReactomeAdapter
+from .omim_adapter import OMIMAdapter
+from .gtex_adapter import GTExAdapter
+from .corum_adapter import CORUMAdapter
 
 __all__ = [
     "HGNCAdapter",
@@ -31,4 +37,7 @@ __all__ = [
     "HPOAdapter",
     "CellMarkerAdapter",
     "ReactomeAdapter",
+    "OMIMAdapter",
+    "GTExAdapter",
+    "CORUMAdapter",
 ]
