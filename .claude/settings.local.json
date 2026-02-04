@@ -18,7 +18,8 @@
       "WebFetch(domain:arxiv.org)",
       "Bash(wc:*)",
       "Bash(uniq:*)",
-      "Bash(head:*)"
+      "Bash(head:*)",
+      "Bash(ls:*)"
     ]
   }
 }
