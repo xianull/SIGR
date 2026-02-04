@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:biocypher.org)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.biocypher.org)",
+      "Bash(tree:*)",
+      "Bash(curl:*)",
+      "Bash(gunzip:*)",
+      "Bash(python:*)",
+      "Bash(grep:*)",
+      "Bash(python3:*)",
+      "Bash(pip show:*)",
+      "Bash(pip install:*)",
+      "Bash(xargs:*)",
+      "Bash(find:*)",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(wc:*)",
+      "Bash(uniq:*)",
+      "Bash(head:*)"
+    ]
+  }
+}

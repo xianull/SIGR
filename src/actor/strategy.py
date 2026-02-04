@@ -1,0 +1,448 @@
+"""
+Strategy Definition for SIGR Actor
+
+Defines the action space for the MDP - the strategy configuration
+that the Actor uses to guide KG extraction and text generation.
+"""
+
+import json
+import re
+import logging
+from dataclasses import dataclass, field, asdict
+from typing import List, Literal, Optional, Dict, Any
+
+
+logger = logging.getLogger(__name__)
+
+SamplingMethod = Literal['top_k', 'random', 'weighted']
+
+
+@dataclass
+class StrategyConfig:
+    """Configuration for KG extraction and text generation strategy.
+
+    This represents the "Action" in the MDP formulation.
+    """
+    # KG extraction parameters
+    edge_types: List[str] = field(default_factory=lambda: ['PPI', 'GO', 'HPO'])
+    max_hops: int = 2
+    sampling: SamplingMethod = 'top_k'
+    max_neighbors: int = 50
+
+    # Text generation parameters
+    prompt_template: str = ""
+
+    # Metadata
+    reasoning: str = ""  # LLM's reasoning for this strategy
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'StrategyConfig':
+        """Create from dictionary."""
+        # Filter to valid fields only
+        valid_fields = {
+            'edge_types', 'max_hops', 'sampling',
+            'max_neighbors', 'prompt_template', 'reasoning'
+        }
+        filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+        return cls(**filtered_data)
+
+
+class Strategy:
+    """
+    Strategy manager for the Actor.
+
+    Handles strategy initialization, validation, and parsing from LLM outputs.
+    """
+
+    # Valid edge types in the KG
+    VALID_EDGE_TYPES = {'PPI', 'GO', 'HPO', 'TRRUST', 'CellMarker', 'Reactome'}
+
+    # Valid sampling methods
+    VALID_SAMPLING = {'top_k', 'random', 'weighted'}
+
+    # Parameter constraints
+    MIN_HOPS = 1
+    MAX_HOPS = 3
+    MIN_NEIGHBORS = 10
+    MAX_NEIGHBORS = 200
+
+    def __init__(self, config: Optional[StrategyConfig] = None):
+        """Initialize strategy with optional config."""
+        self.config = config or StrategyConfig()
+        self._validate()
+
+    def _validate(self):
+        """Validate strategy configuration."""
+        # Validate edge types
+        invalid_edges = set(self.config.edge_types) - self.VALID_EDGE_TYPES
+        if invalid_edges:
+            raise ValueError(f"Invalid edge types: {invalid_edges}")
+
+        # Validate sampling method
+        if self.config.sampling not in self.VALID_SAMPLING:
+            raise ValueError(f"Invalid sampling method: {self.config.sampling}")
+
+        # Validate numeric constraints
+        if not (self.MIN_HOPS <= self.config.max_hops <= self.MAX_HOPS):
+            self.config.max_hops = max(self.MIN_HOPS,
+                                       min(self.config.max_hops, self.MAX_HOPS))
+
+        if not (self.MIN_NEIGHBORS <= self.config.max_neighbors <= self.MAX_NEIGHBORS):
+            self.config.max_neighbors = max(self.MIN_NEIGHBORS,
+                                            min(self.config.max_neighbors, self.MAX_NEIGHBORS))
+
+    def get_config(self) -> StrategyConfig:
+        """Get the strategy configuration."""
+        return self.config
+
+    def update(self, **kwargs):
+        """Update strategy parameters."""
+        for key, value in kwargs.items():
+            if hasattr(self.config, key):
+                setattr(self.config, key, value)
+        self._validate()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert strategy to dictionary."""
+        return self.config.to_dict()
+
+    def to_json(self) -> str:
+        """Convert strategy to JSON string."""
+        return json.dumps(self.to_dict(), indent=2)
+
+    @classmethod
+    def from_json(cls, json_str: str) -> 'Strategy':
+        """Create strategy from JSON string."""
+        data = json.loads(json_str)
+        config = StrategyConfig.from_dict(data)
+        return cls(config)
+
+    @classmethod
+    def parse_from_llm_response(cls, response: str, fallback_strategy: Optional['Strategy'] = None) -> 'Strategy':
+        """
+        Parse strategy from LLM response with robust multi-stage parsing.
+
+        Implements a robust parsing pipeline:
+        1. Try JSON code block extraction
+        2. Try raw JSON parsing
+        3. Try key-value extraction from natural language
+        4. Fall back to default/previous strategy
+
+        Args:
+            response: Raw LLM response text
+            fallback_strategy: Strategy to use if parsing fails (preserves continuity)
+
+        Returns:
+            Parsed Strategy object
+        """
+        parsed_data = None
+        parse_method = None
+
+        # Stage 1: Try JSON code block patterns (most common LLM output format)
+        json_patterns = [
+            (r'```json\s*([\s\S]*?)\s*```', 'json_block'),      # ```json ... ```
+            (r'```\s*([\s\S]*?)\s*```', 'code_block'),           # ``` ... ```
+            (r'(\{[\s\S]*"edge_types"[\s\S]*\})', 'inline_json'), # Inline JSON with edge_types
+        ]
+
+        for pattern, method_name in json_patterns:
+            match = re.search(pattern, response)
+            if match:
+                json_str = match.group(1).strip()
+                try:
+                    parsed_data = json.loads(json_str)
+                    parse_method = method_name
+                    logger.debug(f"Strategy parsed using {method_name}")
+                    break
+                except json.JSONDecodeError:
+                    continue
+
+        # Stage 2: Try parsing entire response as JSON
+        if parsed_data is None:
+            try:
+                # Clean up common issues
+                cleaned = response.strip()
+                # Remove leading/trailing text before/after JSON
+                json_match = re.search(r'\{[\s\S]*\}', cleaned)
+                if json_match:
+                    parsed_data = json.loads(json_match.group(0))
+                    parse_method = 'full_json'
+                    logger.debug("Strategy parsed as full JSON")
+            except json.JSONDecodeError:
+                pass
+
+        # Stage 3: Key-value extraction from natural language
+        if parsed_data is None:
+            parsed_data = cls._extract_from_natural_language(response)
+            if parsed_data:
+                parse_method = 'natural_language'
+                logger.debug("Strategy extracted from natural language")
+
+        # Stage 4: Fall back to default or provided fallback
+        if parsed_data is None:
+            if fallback_strategy:
+                logger.warning("Strategy parsing failed, using fallback strategy")
+                return fallback_strategy
+            else:
+                logger.warning("Strategy parsing failed, using default strategy")
+                return cls()
+
+        # Validate and sanitize parsed data
+        validated_data = cls._validate_and_sanitize(parsed_data)
+
+        logger.info(f"Strategy parsed successfully via {parse_method}: "
+                   f"edge_types={validated_data.get('edge_types', [])}")
+
+        config = StrategyConfig.from_dict(validated_data)
+        return cls(config)
+
+    @classmethod
+    def _extract_from_natural_language(cls, text: str) -> Optional[Dict[str, Any]]:
+        """
+        Extract strategy parameters from natural language response.
+
+        Handles cases where LLM outputs prose instead of JSON.
+        """
+        data = {}
+
+        # Extract edge_types
+        edge_type_patterns = [
+            r'edge[_\s]?types?[:\s]+\[([^\]]+)\]',
+            r'edge[_\s]?types?[:\s]+([A-Z,\s]+)',
+            r'(?:use|include|focus on|prioritize)\s+(?:the\s+)?([A-Z]+(?:\s*,\s*[A-Z]+)*)\s+(?:edges?|types?)',
+        ]
+        for pattern in edge_type_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                edge_str = match.group(1)
+                # Parse edge types
+                edges = re.findall(r'[A-Z][A-Za-z]+', edge_str)
+                valid_edges = [e for e in edges if e in cls.VALID_EDGE_TYPES]
+                if valid_edges:
+                    data['edge_types'] = valid_edges
+                    break
+
+        # Extract max_hops
+        hops_patterns = [
+            r'max[_\s]?hops?[:\s]+(\d+)',
+            r'(\d+)[_\s]?hops?',
+            r'depth[:\s]+(\d+)',
+        ]
+        for pattern in hops_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                data['max_hops'] = int(match.group(1))
+                break
+
+        # Extract max_neighbors
+        neighbors_patterns = [
+            r'max[_\s]?neighbors?[:\s]+(\d+)',
+            r'max[_\s]?neighbors?\s+(?:of\s+)?(\d+)',
+            r'(\d+)\s+neighbors?',
+            r'neighbors?[:\s]+(\d+)',
+            r'neighbors?\s+(?:of|=|:)\s*(\d+)',
+        ]
+        for pattern in neighbors_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                data['max_neighbors'] = int(match.group(1))
+                break
+
+        # Extract sampling method
+        sampling_patterns = [
+            r'sampling[:\s]+["\']?(\w+)["\']?',
+            r'(?:use|with)\s+(top_k|random|weighted)\s+sampling',
+        ]
+        for pattern in sampling_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                method = match.group(1).lower()
+                if method in cls.VALID_SAMPLING:
+                    data['sampling'] = method
+                    break
+
+        # Extract reasoning if present
+        reasoning_patterns = [
+            r'reasoning[:\s]+["\']?(.+?)["\']?(?:\n|$)',
+            r'because[:\s]+(.+?)(?:\n|$)',
+            r'rationale[:\s]+(.+?)(?:\n|$)',
+        ]
+        for pattern in reasoning_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                data['reasoning'] = match.group(1).strip()[:500]
+                break
+
+        return data if data else None
+
+    @classmethod
+    def _validate_and_sanitize(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate and sanitize parsed strategy data.
+        """
+        validated = {}
+
+        # Validate edge_types
+        if 'edge_types' in data:
+            edge_types = data['edge_types']
+            if isinstance(edge_types, list):
+                validated['edge_types'] = [
+                    et for et in edge_types if et in cls.VALID_EDGE_TYPES
+                ]
+            elif isinstance(edge_types, str):
+                # Handle comma-separated string
+                validated['edge_types'] = [
+                    et.strip() for et in edge_types.split(',')
+                    if et.strip() in cls.VALID_EDGE_TYPES
+                ]
+
+        if not validated.get('edge_types'):
+            validated['edge_types'] = ['PPI', 'GO', 'HPO']
+
+        # Validate max_hops
+        if 'max_hops' in data:
+            try:
+                max_hops = int(data['max_hops'])
+                validated['max_hops'] = max(cls.MIN_HOPS, min(max_hops, cls.MAX_HOPS))
+            except (ValueError, TypeError):
+                validated['max_hops'] = 2
+
+        # Validate max_neighbors
+        if 'max_neighbors' in data:
+            try:
+                max_neighbors = int(data['max_neighbors'])
+                validated['max_neighbors'] = max(cls.MIN_NEIGHBORS, min(max_neighbors, cls.MAX_NEIGHBORS))
+            except (ValueError, TypeError):
+                validated['max_neighbors'] = 50
+
+        # Validate sampling method
+        if 'sampling' in data:
+            sampling = str(data['sampling']).lower()
+            validated['sampling'] = sampling if sampling in cls.VALID_SAMPLING else 'top_k'
+
+        # Preserve reasoning
+        if 'reasoning' in data and isinstance(data['reasoning'], str):
+            validated['reasoning'] = data['reasoning'][:500]
+
+        return validated
+
+    def __repr__(self) -> str:
+        return f"Strategy({self.config})"
+
+    @classmethod
+    def parse_with_retry(
+        cls,
+        response: str,
+        llm_client,
+        fallback_strategy: Optional['Strategy'] = None,
+        max_retries: int = 2
+    ) -> 'Strategy':
+        """
+        Parse strategy from LLM response with retry on failure.
+
+        If initial parsing fails or returns the fallback (indicating failure),
+        requests the LLM to fix the format.
+
+        Args:
+            response: Raw LLM response text
+            llm_client: LLM client for retry requests
+            fallback_strategy: Strategy to use as fallback
+            max_retries: Maximum number of retry attempts
+
+        Returns:
+            Parsed Strategy object
+        """
+        for attempt in range(max_retries + 1):
+            strategy = cls.parse_from_llm_response(response, fallback_strategy)
+
+            # Check if parsing actually extracted new values
+            # (not just returning the fallback unchanged)
+            if strategy and fallback_strategy:
+                strategy_dict = strategy.to_dict()
+                fallback_dict = fallback_strategy.to_dict()
+                # Compare key fields to see if we got new values
+                key_fields = ['edge_types', 'max_hops', 'max_neighbors', 'sampling']
+                has_changes = any(
+                    strategy_dict.get(f) != fallback_dict.get(f)
+                    for f in key_fields
+                )
+                if has_changes:
+                    logger.info(f"Strategy parsed successfully on attempt {attempt + 1}")
+                    return strategy
+            elif strategy and not fallback_strategy:
+                # No fallback to compare, assume success
+                logger.info(f"Strategy parsed successfully on attempt {attempt + 1}")
+                return strategy
+
+            # Parsing failed or returned unchanged fallback, request LLM to fix
+            if attempt < max_retries:
+                logger.warning(f"Strategy parsing attempt {attempt + 1} failed, requesting LLM to fix format")
+
+                repair_prompt = f"""Your previous response could not be parsed as a valid strategy JSON.
+
+Previous response (truncated):
+{response[:800]}
+
+Please output a valid strategy JSON in exactly this format:
+```json
+{{
+    "edge_types": ["PPI", "GO", "HPO"],
+    "max_hops": 2,
+    "sampling": "top_k",
+    "max_neighbors": 50,
+    "reasoning": "Your explanation here"
+}}
+```
+
+Requirements:
+- edge_types: Array of strings from [PPI, GO, HPO, TRRUST, CellMarker, Reactome]
+- max_hops: Integer between 1-3
+- sampling: One of "top_k", "random", "weighted"
+- max_neighbors: Integer between 10-200
+- reasoning: Brief explanation string
+
+Output ONLY the JSON block, no additional text."""
+
+                try:
+                    if hasattr(llm_client, 'generate_strong'):
+                        response = llm_client.generate_strong(repair_prompt)
+                    else:
+                        response = llm_client.generate(repair_prompt)
+                except Exception as e:
+                    logger.error(f"LLM repair request failed: {e}")
+                    break
+
+        # All retries exhausted, return fallback or default
+        logger.warning(f"Strategy parsing failed after {max_retries + 1} attempts")
+        return fallback_strategy or cls()
+
+
+def get_default_strategy(task_name: str) -> Strategy:
+    """
+    Get default strategy for a task.
+
+    Args:
+        task_name: Name of the downstream task
+
+    Returns:
+        Strategy configured for the task
+    """
+    from .prompts import TASK_EDGE_PRIORITIES, TASK_INITIAL_PROMPTS
+
+    edge_types = TASK_EDGE_PRIORITIES.get(task_name, ['PPI', 'GO', 'HPO'])
+    prompt_template = TASK_INITIAL_PROMPTS.get(task_name, "")
+
+    config = StrategyConfig(
+        edge_types=edge_types,
+        max_hops=2,
+        sampling='top_k',
+        max_neighbors=50,
+        prompt_template=prompt_template,
+        reasoning="Initial task-specific strategy"
+    )
+
+    return Strategy(config)

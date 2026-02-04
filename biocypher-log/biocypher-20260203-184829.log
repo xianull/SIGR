@@ -1,0 +1,34 @@
+2026-02-03 18:48:29,729	INFO	module:_logger
+This is BioCypher v0.12.5.
+2026-02-03 18:48:29,729	INFO	module:_logger
+Logging into `biocypher-log/biocypher-20260203-184829.log`.
+2026-02-03 18:48:29,729	DEBUG	module:_create
+Loading module biocypher._create.
+2026-02-03 18:48:29,731	DEBUG	module:_deduplicate
+Loading module biocypher._deduplicate.
+2026-02-03 18:48:29,801	DEBUG	module:_misc
+Loading module biocypher._misc.
+2026-02-03 18:48:29,801	DEBUG	module:_get
+Loading module biocypher._get.
+2026-02-03 18:48:29,801	DEBUG	module:_mapping
+Loading module biocypher._mapping.
+2026-02-03 18:48:29,825	DEBUG	module:_ontology
+Loading module biocypher._ontology.
+2026-02-03 18:48:29,827	DEBUG	module:_translate
+Loading module biocypher._translate.
+2026-02-03 18:48:29,827	DEBUG	module:_get_connector
+Loading module biocypher.output.connect._get_connector.
+2026-02-03 18:48:30,041	DEBUG	module:_get_in_memory_kg
+Loading module biocypher.output.in_memory._get_in_memory_kg.
+2026-02-03 18:48:30,045	DEBUG	module:_get_writer
+Loading module biocypher.output.write._get_writer.
+2026-02-03 18:48:30,045	DEBUG	module:_core
+Loading module biocypher._core.
+2026-02-03 18:48:30,052	INFO	module:_core
+Running BioCypher with schema configuration from /Users/xianull/Documents/Project/SIGR/kg_builder/config/schema_config.yaml.
+2026-02-03 18:48:31,178	INFO	module:_ontology
+Loading ontologies...
+2026-02-03 18:48:31,178	INFO	module:_ontology
+Instantiating OntologyAdapter class for https://github.com/biolink/biolink-model/raw/v3.2.1/biolink-model.owl.ttl.
+2026-02-03 18:48:35,767	ERROR	module:_ontology
+Node cell type not found in ontology, but also has no inheritance definition. Please check your schema for spelling errors, first letter not in lower case, use of underscores, a missing `is_a` definition (SubClassOf a root node), or missing labels in class or super-classes.

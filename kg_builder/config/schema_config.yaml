@@ -1,0 +1,213 @@
+# BioCypher Schema Configuration for SIGR Knowledge Graph
+# Maps domain entities to Biolink Model ontology
+# Reference: https://biolink.github.io/biolink-model/
+
+# ============================================================
+# NODE TYPES (Entities)
+# ============================================================
+
+gene:
+  # Maps to biolink:Gene
+  is_a: biological entity
+  represented_as: node
+  preferred_id: hgnc.symbol
+  input_label: Gene
+  properties:
+    symbol: str
+    name: str
+    hgnc_id: str
+    ensembl_id: str
+    entrez_id: str
+    chromosome: str
+    gene_type: str
+    description: str
+
+protein:
+  # Maps to biolink:Protein
+  is_a: biological entity
+  represented_as: node
+  preferred_id: uniprot
+  input_label: Protein
+  properties:
+    uniprot_id: str
+    name: str
+    ensp_id: str
+    sequence_length: int
+
+biological process:
+  # Maps to biolink:BiologicalProcess
+  is_a: biological process or activity
+  represented_as: node
+  preferred_id: go
+  input_label: BiologicalProcess
+  properties:
+    go_id: str
+    name: str
+    namespace: str
+    definition: str
+
+phenotypic feature:
+  # Maps to biolink:PhenotypicFeature
+  is_a: biological entity
+  represented_as: node
+  preferred_id: hp
+  input_label: Phenotype
+  properties:
+    hpo_id: str
+    name: str
+    definition: str
+
+disease:
+  # Maps to biolink:Disease
+  is_a: biological entity
+  represented_as: node
+  preferred_id: mondo
+  input_label: Disease
+  properties:
+    disease_id: str
+    name: str
+    description: str
+
+cell:
+  # Maps to biolink:Cell
+  is_a: anatomical entity
+  represented_as: node
+  preferred_id: cl
+  input_label: CellType
+  properties:
+    cell_type_id: str
+    name: str
+    tissue_origin: str
+    cell_ontology_id: str
+
+pathway:
+  # Maps to biolink:Pathway
+  is_a: biological process or activity
+  represented_as: node
+  preferred_id: reactome
+  input_label: Pathway
+  properties:
+    reactome_id: str
+    name: str
+    species: str
+
+# ============================================================
+# EDGE TYPES (Relationships)
+# ============================================================
+
+# Gene-Gene/Protein Interactions (STRING)
+pairwise molecular interaction:
+  # Maps to biolink:PairwiseMolecularInteraction
+  is_a: association
+  represented_as: edge
+  input_label: INTERACTS_WITH
+  source: gene
+  target: gene
+  properties:
+    combined_score: float
+    experimental_score: float
+    database_score: float
+    textmining_score: float
+    source_database: str
+
+# TF-Target Regulation (TRRUST)
+regulates:
+  # Maps to biolink:Regulates (via RegulatoryRelationship)
+  is_a: affects
+  represented_as: edge
+  input_label: REGULATES
+  source: gene
+  target: gene
+  properties:
+    regulation_type: str  # activation, repression, unknown
+    direction: str
+    pubmed_id: str
+    source_database: str
+
+# Gene-GO Annotations
+participates in:
+  # Maps to biolink:ParticipatesIn
+  is_a: association
+  represented_as: edge
+  input_label: PARTICIPATES_IN
+  source: gene
+  target: biological process
+  properties:
+    evidence_code: str
+    qualifier: str
+    source_database: str
+
+# Gene-Phenotype Associations (HPO)
+gene to phenotypic feature association:
+  # Maps to biolink:GeneToPhenotypicFeatureAssociation
+  is_a: association
+  represented_as: edge
+  input_label: HAS_PHENOTYPE
+  source: gene
+  target: phenotypic feature
+  properties:
+    evidence: str
+    frequency: str
+    source_database: str
+
+# Gene-Disease Associations (DisGeNET)
+gene to disease association:
+  # Maps to biolink:GeneToDiseaseAssociation
+  is_a: association
+  represented_as: edge
+  input_label: ASSOCIATED_WITH_DISEASE
+  source: gene
+  target: disease
+  properties:
+    score: float
+    evidence_count: int
+    source_database: str
+
+# Gene-CellType Marker Relations (CellMarker)
+expressed in:
+  # Maps to biolink:ExpressedIn
+  is_a: association
+  represented_as: edge
+  input_label: MARKER_OF
+  source: gene
+  target: cell
+  properties:
+    tissue_type: str
+    marker_type: str
+    pubmed_id: str
+    source_database: str
+
+# Gene Family Relations (HGNC)
+in taxon:
+  # Maps to biolink:InTaxon for grouping
+  is_a: association
+  represented_as: edge
+  input_label: IN_SAME_FAMILY
+  source: gene
+  target: gene
+  properties:
+    family_id: str
+    family_name: str
+
+# Gene-Pathway Relations (Reactome)
+in pathway:
+  # Maps to biolink:InPathway
+  is_a: association
+  represented_as: edge
+  input_label: IN_PATHWAY
+  source: gene
+  target: pathway
+  properties:
+    evidence: str
+    source_database: str
+
+# Pathway Hierarchy (Reactome)
+pathway contains:
+  # Pathway hierarchy - parent contains child
+  is_a: related to
+  represented_as: edge
+  input_label: PATHWAY_CONTAINS
+  source: pathway
+  target: pathway
+  properties:
+    source_database: str

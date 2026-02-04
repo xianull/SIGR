@@ -1,0 +1,25 @@
+# BioCypher Configuration for SIGR Knowledge Graph
+# Official BioCypher settings
+
+biocypher:
+  # Database management system for output
+  # Using networkx for in-memory graph
+  dbms: networkx
+
+  # Offline mode: false for in-memory operation with networkx
+  # When dbms is networkx and offline is false, BioCypher builds graph in memory
+  offline: false
+
+  # Strict mode - enforce schema validation
+  strict_mode: false
+
+  # Output directory (used when offline: true)
+  output_directory: data/kg/biocypher_output/
+
+  # Schema configuration path
+  schema_config_path: schema_config.yaml
+
+  # Head ontology configuration (Biolink Model v3.2.1)
+  head_ontology:
+    url: https://github.com/biolink/biolink-model/raw/v3.2.1/biolink-model.owl.ttl
+    root_node: named thing
