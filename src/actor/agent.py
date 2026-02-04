@@ -207,7 +207,8 @@ class ActorAgent:
         raw_metric: Optional[float] = None,
         strategy_dict: Optional[Dict[str, Any]] = None,
         trend_analysis: Optional[Dict[str, Any]] = None,
-        kgbook_suggestions: Optional[str] = None
+        kgbook_suggestions: Optional[str] = None,
+        edge_effects: Optional[Dict[str, Dict]] = None
     ):
         """
         Update policy based on reward and feedback using LLM reflection.
@@ -305,7 +306,7 @@ class ActorAgent:
         if self.ucb_bandit and raw_metric is not None:
             # Normalize reward to [0, 1] for UCB
             normalized_reward = max(0.0, min(1.0, raw_metric))
-            self.ucb_bandit.update_all(current_strategy_dict, normalized_reward)
+            self.ucb_bandit.update_all(tracker_strategy, normalized_reward)
             logger.debug(f"UCB updated with normalized reward: {normalized_reward:.4f}")
 
         # Track best strategy using raw_metric (not relative reward)
@@ -361,7 +362,8 @@ class ActorAgent:
                     for h in self.history
                 ],
                 trend_analysis=trend_analysis,
-                best_reward=self.best_reward
+                best_reward=self.best_reward,
+                edge_effects=edge_effects
             )
         else:
             reflection_prompt = get_reflection_prompt(
@@ -447,6 +449,9 @@ class ActorAgent:
             else:
                 critiqued_response = self.llm.generate(critique_prompt)
 
+            # Store critique for logging
+            self._last_critique = critiqued_response
+
             # Log critique result
             if 'confidence' in critiqued_response.lower():
                 logger.debug("Self-critique completed with confidence assessment")
@@ -455,7 +460,12 @@ class ActorAgent:
 
         except Exception as e:
             logger.warning(f"Self-critique failed: {e}, using original response")
+            self._last_critique = f"Error: {e}"
             return initial_response
+
+    def get_last_critique(self) -> str:
+        """Get the last self-critique response."""
+        return getattr(self, '_last_critique', "")
 
     def _apply_consistency_check(self, proposed_strategy: Strategy) -> Strategy:
         """

@@ -76,13 +76,16 @@ class Memory:
     """
 
     # EMA decay factor (higher = more weight to history)
-    EMA_DECAY = 0.9
+    # 0.7 means 30% weight to new data (was 0.9 = 10%)
+    EMA_DECAY = 0.7
 
     # Minimum samples before using learned weights
-    MIN_SAMPLES = 3
+    # Lower threshold enables faster adaptation
+    MIN_SAMPLES = 2
 
     # Learning rate for mixing prior and learned weights
-    LEARNING_RATE = 0.3
+    # 0.5 gives equal weight to prior and learned (was 0.3)
+    LEARNING_RATE = 0.5
 
     # Base prior weights for edge types
     BASE_PRIOR_WEIGHTS = {
@@ -308,14 +311,20 @@ class Memory:
         for edge_type in ALL_EDGE_TYPES:
             weights[edge_type] = self._compute_single_weight(task_name, edge_type)
 
-        # Normalize to [0.1, 1.0] range
+        # Normalize to [0.05, 1.0] range with non-linear scaling
+        # This preserves more differentiation between edge types
         if weights:
             max_w = max(weights.values())
             min_w = min(weights.values())
             if max_w > min_w:
                 for et in weights:
+                    # Linear normalization to [0, 1]
                     normalized = (weights[et] - min_w) / (max_w - min_w)
-                    weights[et] = round(0.1 + 0.9 * normalized, 3)
+                    # Apply power scaling to expand middle range differences
+                    # 0.7 power makes differences more pronounced
+                    scaled = normalized ** 0.7
+                    # Map to [0.05, 1.0] - lower floor allows more differentiation
+                    weights[et] = round(0.05 + 0.95 * scaled, 3)
             else:
                 for et in weights:
                     weights[et] = 0.5

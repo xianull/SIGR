@@ -595,7 +595,9 @@ class SIGRFramework:
         # 只在 iteration > 1 时统计 plateau（baseline 不算）
         if iteration == 1:
             # Iteration 1 是 baseline，不参与 plateau 计数
-            logger.info("Memory: Baseline iteration (iter 1), skipping plateau tracking")
+            # Set baseline metric for "no improvement = punishment" strategy
+            self.evaluator.set_baseline_metric(current_metric)
+            logger.info(f"Memory: Baseline iteration (iter 1), metric={current_metric:.4f} set as baseline")
         elif current_metric > previous_best:
             # 有改进，记录到 Memory
             improvement = current_metric - previous_best
@@ -639,6 +641,9 @@ class SIGRFramework:
 
         self.logger.log_feedback(feedback)
 
+        # Get edge effects for Actor to see historical edge type effectiveness
+        task_edge_effects = self.memory.data.get("task_edge_effects", {}).get(self.task_name, {})
+
         # Actor reflects and updates policy
         self.actor.update_policy(
             reward,
@@ -646,9 +651,36 @@ class SIGRFramework:
             raw_metric=reward_result.raw_metric,
             strategy_dict=strategy,  # Pass full strategy dict (includes is_baseline)
             trend_analysis=trend_analysis,
-            kgbook_suggestions=memory_suggestions
+            kgbook_suggestions=memory_suggestions,
+            edge_effects=task_edge_effects
         )
+
+        # Log reflection and self-critique
         self.logger.log_reflection(self.actor.get_last_reflection())
+        critique = self.actor.get_last_critique()
+        if critique:
+            self.logger.log_critique(critique)
+
+        # Log reward breakdown
+        self.logger.log_reward_breakdown({
+            'total_reward': reward_result.total_reward,
+            'relative_reward': reward_result.relative_reward,
+            'baseline_reward': reward_result.baseline_reward,
+            'absolute_reward': reward_result.absolute_reward,
+            'plateau_penalty': reward_result.plateau_penalty,
+            'raw_metric': reward_result.raw_metric,
+            'plateau_duration': reward_result.plateau_duration,
+            'weights_used': reward_result.weights_used,
+        })
+
+        # Log critic advantage if available
+        last_advantage = self.actor.get_last_advantage()
+        if last_advantage:
+            self.logger.log_advantage({
+                'advantage': last_advantage.advantage,
+                'state_value': last_advantage.state_value,
+                'action_value': last_advantage.action_value,
+            })
 
         # Save iteration summary
         self.logger.save_iteration_summary({

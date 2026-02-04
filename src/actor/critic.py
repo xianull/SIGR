@@ -58,12 +58,13 @@ class SimpleCritic:
 
     # Value factors for different trends
     # Adjusted to penalize plateau and decline more heavily
+    # Design: "没有改进就是惩罚" - plateau should be punishing, not neutral
     TREND_VALUES = {
-        'improving': 0.80,
-        'plateau': 0.30,      # Lowered: plateau is not progress, shouldn't be rewarded
-        'declining': 0.10,    # Lowered: clearly penalize declining performance
-        'oscillating': 0.25,  # Lowered: oscillation indicates instability
-        'unknown': 0.50,
+        'improving': 0.85,    # Good - reward improvement
+        'plateau': 0.15,      # Very low - plateau is stagnation, needs to explore
+        'declining': 0.05,    # Lowest - clearly penalize decline
+        'oscillating': 0.20,  # Low - oscillation indicates instability
+        'unknown': 0.40,      # Moderate - uncertain state
     }
 
     def __init__(

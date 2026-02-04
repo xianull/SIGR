@@ -1,26 +1,29 @@
 """
 Reward Computation for SIGR MDP Framework
 
-Implements relative reward calculation based on RLHF reward shaping theory.
-Key principle: Δ = metric_t - metric_{t-1} provides clearer learning signal
-than absolute metric values.
+核心设计原则：没有改进就是惩罚 (No improvement = Negative reward)
 
-Components:
-- Relative reward: improvement over previous iteration (normalized to [-1, 1])
-- Baseline reward: comparison to moving average (normalized to [-1, 1])
-- Absolute performance: scaled to [-1, 1]
-- Dynamic plateau penalty: increases with plateau duration
+采用条件分支逻辑代替线性加权：
+- IF current_metric > best_metric: 正向奖励（鼓励改进）
+- ELSE: 负向惩罚（强制探索）
+
+关键机制：
+1. 门控绝对奖励 (Gated Absolute Reward)
+   - 只有改进时才全额发放 absolute_reward
+   - 没有改进时衰减 90%（考 90 分但上次也是 90 分 → 功劳几乎为零）
+
+2. 强制负向主导 (Negative Dominance)
+   - 没有改进时 Penalty 主导，确保 total_reward < -0.2
+   - 明确告诉 Agent "这是错误的状态，必须改变"
+
+3. 动态基准线 (Dynamic Baseline)
+   - 跟 best_metric 比，而不是 moving average
+   - 只有超越历史最佳才有正的 baseline_reward
 
 Theoretical basis:
 - Reward shaping (Ng et al., 1999)
 - RLHF relative comparisons (Christiano et al., 2017)
-- All components normalized to [-1, 1] for consistent gradient signals
-
-Now supports:
-- Configurable weights via RewardWeights
-- Task-specific default weights
-- Adaptive weight adjustment
-- Dynamic plateau penalty based on duration
+- Exploration-exploitation trade-off via negative rewards
 """
 
 import logging
@@ -75,26 +78,20 @@ class RewardResult:
 
 class RewardComputer:
     """
-    Computes normalized rewards for MDP-based strategy optimization.
+    Computes gated rewards for MDP-based strategy optimization.
 
-    All reward components are normalized to [-1, 1] for consistent gradient signals.
+    核心设计：没有改进就是惩罚 (No improvement = Negative reward)
+
+    条件分支逻辑（代替线性加权）：
+    - IF current_metric > best_metric: 正向奖励
+    - ELSE: 负向惩罚（强制为负）
 
     Components:
-    - Relative reward: (metric_t - metric_{t-1}) / metric_range, clipped to [-1, 1]
-    - Baseline reward: (metric_t - baseline) / metric_range, clipped to [-1, 1]
-    - Absolute reward: 2 * metric - 1 (converts [0,1] to [-1,1]) with non-linear bonus for high scores
-    - Dynamic plateau penalty: base_penalty * (1 + duration * escalation_rate)
-    - SOTA protection: guarantees positive reward when maintaining best performance
-
-    Theoretical basis:
-    - Reward shaping (Ng et al., 1999)
-    - RLHF relative comparisons (Christiano et al., 2017)
-    - Normalized rewards for stable learning
-
-    Default weights (emphasizing absolute performance):
-    - baseline_weight: 0.10
-    - relative_weight: 0.10
-    - raw_weight: 0.80
+    - Gated absolute reward: 只有改进时全额发放，否则衰减 90%
+    - Dynamic baseline: 跟 best_metric 比，而不是 moving average
+    - No-improvement penalty: 基础惩罚 -0.3，退步时更重
+    - Plateau penalty: 持续停滞的额外惩罚
+    - Forced negative ceiling: 没有改进时 reward 上限为 -0.2
     """
 
     # Metric range for normalization (assuming metrics in [0, 1])
@@ -105,9 +102,12 @@ class RewardComputer:
     HIGH_SCORE_THRESHOLD = 0.8  # Threshold for non-linear bonus
     HIGH_SCORE_SCALING = 5.0    # Scaling factor for bonus
 
-    # SOTA protection parameters
-    SOTA_TOLERANCE = 0.001      # Tolerance for SOTA comparison
-    SOTA_MIN_REWARD = 0.1       # Minimum reward when at SOTA
+    # 门控参数 (Gated Reward Parameters)
+    GATED_DECAY_FACTOR = 0.1           # 没有改进时 absolute_reward 衰减系数
+    NO_IMPROVEMENT_BASE = -0.3         # 没有改进的基础惩罚
+    NO_IMPROVEMENT_GAP_SCALE = 2.0     # 退步惩罚的放大系数
+    NO_IMPROVEMENT_MAX_PENALTY = -0.6  # 最大惩罚上限
+    FORCED_NEGATIVE_CEILING = -0.2     # 没有改进时的 reward 上限（强制负向）
 
     def __init__(
         self,
@@ -133,8 +133,8 @@ class RewardComputer:
         max_plateau_penalty: float = -0.3,
         # Non-linear scaling
         enable_nonlinear_scaling: bool = True,
-        # SOTA protection
-        enable_sota_protection: bool = True,
+        # No-improvement penalty (核心: 没有改进就是惩罚)
+        enable_no_improvement_penalty: bool = True,
     ):
         """
         Initialize RewardComputer with normalized reward calculation.
@@ -156,12 +156,12 @@ class RewardComputer:
             plateau_escalation_rate: Rate of penalty increase per plateau iteration
             max_plateau_penalty: Maximum penalty cap (-0.3)
             enable_nonlinear_scaling: Enable non-linear bonus for high scores (>0.8)
-            enable_sota_protection: Enable SOTA protection (positive reward when at best)
+            enable_no_improvement_penalty: Enable "no improvement = punishment" strategy
         """
-        # Non-linear scaling and SOTA protection flags
+        # Non-linear scaling and gated reward flags
         self.enable_nonlinear_scaling = enable_nonlinear_scaling
-        self.enable_sota_protection = enable_sota_protection
-        self._best_metric: Optional[float] = None  # Track best metric for SOTA protection
+        self.enable_no_improvement_penalty = enable_no_improvement_penalty
+        self._best_metric: Optional[float] = None  # Track best metric for gating
 
         # Determine weights (priority: explicit weights > task_name > legacy > defaults)
         # New default weights: baseline=0.10, relative=0.10, raw=0.80 (emphasize absolute performance)
@@ -228,7 +228,7 @@ class RewardComputer:
             f"RewardComputer initialized (normalized): "
             f"weights=(relative={self.relative_weight}, absolute={self.raw_weight}, baseline={self.baseline_weight}), "
             f"plateau_penalty_base={self.base_plateau_penalty}, escalation={self.plateau_escalation_rate}, "
-            f"nonlinear_scaling={self.enable_nonlinear_scaling}, sota_protection={self.enable_sota_protection}"
+            f"nonlinear_scaling={self.enable_nonlinear_scaling}, no_improvement_penalty={self.enable_no_improvement_penalty}"
         )
 
     def _compute_absolute_reward(self, metric: float) -> float:
@@ -262,16 +262,14 @@ class RewardComputer:
 
         return np.clip(linear, -1.0, 1.0)
 
-    def update_best_metric(self, metric: float):
+    def set_baseline_metric(self, metric: float):
         """
-        Update the best metric seen (for SOTA protection).
+        Legacy method kept for compatibility.
 
-        Args:
-            metric: Current metric value
+        新的门控逻辑不再需要单独设置 baseline，
+        因为 best_metric 在第一次迭代时自动设置。
         """
-        if self._best_metric is None or metric > self._best_metric:
-            self._best_metric = metric
-            logger.debug(f"Best metric updated: {metric:.4f}")
+        pass  # No-op, best_metric is set automatically in compute()
 
     def update_weights_for_trend(self, metric: float, trend: str = 'unknown'):
         """
@@ -360,149 +358,163 @@ class RewardComputer:
         history: Optional[List[float]] = None
     ) -> RewardResult:
         """
-        Compute normalized reward based on current metric and history.
+        Compute gated reward based on improvement over best metric.
 
-        All components are normalized to [-1, 1] for consistent learning signals.
-        Includes non-linear scaling for high scores and SOTA protection.
+        核心设计原则：没有改进就是惩罚 (No improvement = Negative reward)
+
+        条件分支逻辑：
+        - IF current_metric > best_metric: 正向奖励（鼓励改进）
+        - ELSE: 负向惩罚（强制探索）
+
+        关键机制：
+        1. 门控绝对奖励：只有改进时才发放 absolute_reward
+        2. 强制负向主导：没有改进时 reward 必须为负
+        3. 动态基准线：跟 best_metric 比，而不是 moving average
 
         Args:
             current_metric: Current iteration's primary metric value (in [0, 1])
             history: List of previous metric values (oldest to newest)
 
         Returns:
-            RewardResult with total reward and breakdown (all in [-1, 1])
+            RewardResult with total reward and breakdown
         """
         metric_range = self.METRIC_MAX - self.METRIC_MIN
 
-        # Update best metric tracking for SOTA protection
-        self.update_best_metric(current_metric)
+        # 判断是否有改进
+        is_improvement = (self._best_metric is None) or (current_metric > self._best_metric)
+
+        # 计算原始 absolute_reward
+        raw_absolute_reward = self._compute_absolute_reward(current_metric)
 
         if history is None or len(history) == 0:
-            # First iteration: use weighted formula with relative=0, baseline=0
-            absolute_reward = self._compute_absolute_reward(current_metric)
+            # 第一次迭代：建立 baseline，给予适度正向奖励
+            self._best_metric = current_metric
+            self._plateau_duration = 0
 
-            # Apply same weighted formula as subsequent iterations
-            # This ensures consistent reward scale across all iterations
-            total_reward = (
-                self.relative_weight * 0.0 +        # No history, relative improvement = 0
-                self.raw_weight * absolute_reward + # Weighted absolute performance
-                self.baseline_weight * 0.0          # No history, baseline comparison = 0
-            )
+            # 第一次迭代：正常发放 absolute_reward
+            total_reward = self.raw_weight * raw_absolute_reward
             total_reward = np.clip(total_reward, -1.0, 1.0)
 
-            self._plateau_duration = 0
+            logger.info(
+                f"First iteration: metric={current_metric:.4f}, "
+                f"absolute={raw_absolute_reward:.4f}, total={total_reward:.4f}"
+            )
+
             return RewardResult(
                 total_reward=total_reward,
                 relative_reward=0.0,
                 baseline_reward=0.0,
-                absolute_reward=absolute_reward,
+                absolute_reward=raw_absolute_reward,
                 plateau_penalty=0.0,
                 raw_metric=current_metric,
                 weights_used=self.get_weights(),
                 plateau_duration=0,
             )
 
-        # 1. Compute relative reward (normalized improvement over previous)
+        # ========== 有历史记录的情况 ==========
+
+        # 1. 计算 relative_reward（相对于上一次的变化）
         previous_metric = history[-1]
         relative_delta = current_metric - previous_metric
         relative_reward = relative_delta / metric_range
         relative_reward = np.clip(relative_reward, -1.0, 1.0)
 
-        # 2. Compute baseline reward (normalized comparison to moving average)
-        window = min(len(history), self.baseline_window)
-        baseline = np.mean(history[-window:])
-        baseline_delta = current_metric - baseline
-        baseline_reward = baseline_delta / metric_range
+        # 2. 动态基准线：跟 best_metric 比，而不是 moving average
+        if self._best_metric is not None:
+            baseline_delta = current_metric - self._best_metric
+            baseline_reward = baseline_delta / metric_range
+        else:
+            baseline_reward = 0.0
         baseline_reward = np.clip(baseline_reward, -1.0, 1.0)
 
-        # 3. Compute absolute reward with non-linear scaling
-        absolute_reward = self._compute_absolute_reward(current_metric)
+        # 3. 门控绝对奖励 (Gated Absolute Reward)
+        if is_improvement:
+            # 改进：全额发放 absolute_reward
+            gated_absolute = raw_absolute_reward
+            no_improvement_penalty = 0.0
+            logger.debug(f"Improvement detected: {self._best_metric:.4f} -> {current_metric:.4f}")
+        else:
+            # 没有改进：absolute_reward 衰减 90%
+            gated_absolute = raw_absolute_reward * self.GATED_DECAY_FACTOR
 
-        # 4. Dynamic plateau penalty
+            # 强制负向主导：计算 no_improvement_penalty
+            improvement_gap = self._best_metric - current_metric
+            no_improvement_penalty = self.NO_IMPROVEMENT_BASE - improvement_gap * self.NO_IMPROVEMENT_GAP_SCALE
+            no_improvement_penalty = max(no_improvement_penalty, self.NO_IMPROVEMENT_MAX_PENALTY)
+
+            logger.debug(
+                f"No improvement: best={self._best_metric:.4f}, current={current_metric:.4f}, "
+                f"gap={improvement_gap:.4f}, penalty={no_improvement_penalty:.4f}"
+            )
+
+        # 4. Plateau penalty（持续停滞的额外惩罚）
         plateau_penalty = 0.0
-
-        # Compute effective threshold (relative or absolute)
         if self.use_relative_plateau_threshold:
-            # Relative threshold: e.g., 0.01 = 1% of previous metric
             effective_threshold = self.plateau_threshold * max(previous_metric, 0.01)
         else:
             effective_threshold = self.plateau_threshold
 
-        # Plateau detection requires at least 2 history points
-        if len(history) >= 2:
-            is_plateau = abs(relative_delta) < effective_threshold
-
-            if is_plateau:
-                # Check if truly in plateau (low variance in recent history)
-                recent_std = np.std(history[-min(3, len(history)):])
-                # Use a slightly larger threshold for variance check
-                variance_threshold = effective_threshold * 1.5
-                if recent_std < variance_threshold:
-                    self._plateau_duration += 1
-                    # Dynamic penalty: increases with duration
-                    plateau_penalty = self.base_plateau_penalty * (
-                        1 + self._plateau_duration * self.plateau_escalation_rate
-                    )
-                    # Cap the penalty
-                    plateau_penalty = max(plateau_penalty, self.max_plateau_penalty)
-                    logger.debug(
-                        f"Plateau detected (duration={self._plateau_duration}), "
-                        f"penalty={plateau_penalty:.4f}, threshold={effective_threshold:.6f}"
-                    )
-                else:
-                    # High variance despite small delta - not a true plateau
-                    self._plateau_duration = 0
+        if len(history) >= 2 and abs(relative_delta) < effective_threshold:
+            recent_std = np.std(history[-min(3, len(history)):])
+            if recent_std < effective_threshold * 1.5:
+                self._plateau_duration += 1
+                plateau_penalty = self.base_plateau_penalty * (
+                    1 + self._plateau_duration * self.plateau_escalation_rate
+                )
+                plateau_penalty = max(plateau_penalty, self.max_plateau_penalty)
             else:
-                # Clear improvement or decline - reset plateau counter
                 self._plateau_duration = 0
-        # else: history < 2, don't modify plateau_duration
+        elif is_improvement:
+            self._plateau_duration = 0
 
-        # 5. Compute total reward (weighted sum, all components in [-1, 1])
+        # 5. 计算总 reward
         total_reward = (
             self.relative_weight * relative_reward +
-            self.raw_weight * absolute_reward +
+            self.raw_weight * gated_absolute +
             self.baseline_weight * baseline_reward +
-            plateau_penalty  # Already in [-0.3, 0]
+            plateau_penalty +
+            no_improvement_penalty
         )
 
-        # 6. SOTA Protection: if current metric >= best metric, ensure positive reward
-        # This rewards maintaining the best performance, preventing unfair negative rewards
-        if self.enable_sota_protection and self._best_metric is not None:
-            if current_metric >= self._best_metric - self.SOTA_TOLERANCE:
-                if total_reward < self.SOTA_MIN_REWARD:
-                    logger.debug(
-                        f"SOTA protection applied: total_reward {total_reward:.4f} -> {self.SOTA_MIN_REWARD:.4f} "
-                        f"(metric={current_metric:.4f}, best={self._best_metric:.4f})"
-                    )
-                    total_reward = self.SOTA_MIN_REWARD
+        # 6. 强制负向：没有改进时确保 reward 为负
+        if not is_improvement and self.enable_no_improvement_penalty:
+            total_reward = min(total_reward, self.FORCED_NEGATIVE_CEILING)
 
-        # Clip final reward to [-1, 1] for safety
+        # Clip final reward
         total_reward = np.clip(total_reward, -1.0, 1.0)
+
+        # 7. 更新 best_metric（只在改进时更新）
+        if is_improvement:
+            self._best_metric = current_metric
+
+        # 合并所有 penalty 用于日志显示
+        combined_penalty = plateau_penalty + no_improvement_penalty
 
         result = RewardResult(
             total_reward=total_reward,
             relative_reward=relative_reward,
             baseline_reward=baseline_reward,
-            absolute_reward=absolute_reward,
-            plateau_penalty=plateau_penalty,
+            absolute_reward=gated_absolute,  # 返回门控后的值
+            plateau_penalty=combined_penalty,
             raw_metric=current_metric,
             weights_used=self.get_weights(),
             plateau_duration=self._plateau_duration,
         )
 
         logger.debug(
-            f"Reward computed (normalized): total={total_reward:.4f}, "
-            f"relative={relative_reward:.4f}, absolute={absolute_reward:.4f}, "
-            f"baseline={baseline_reward:.4f}, plateau_penalty={plateau_penalty:.4f}"
+            f"Reward: total={total_reward:.4f}, is_improvement={is_improvement}, "
+            f"gated_abs={gated_absolute:.4f}, relative={relative_reward:.4f}, "
+            f"baseline={baseline_reward:.4f}, no_improve={no_improvement_penalty:.4f}, "
+            f"plateau={plateau_penalty:.4f}"
         )
 
         return result
 
     def reset_plateau_tracking(self):
-        """Reset plateau duration counter and best metric (call at start of new training run)."""
+        """Reset all tracking state (call at start of new training run)."""
         self._plateau_duration = 0
         self._best_metric = None
-        logger.debug("Plateau tracking and best metric reset")
+        logger.debug("All tracking state reset")
 
     def compute_batch(
         self,

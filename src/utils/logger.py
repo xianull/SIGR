@@ -177,6 +177,48 @@ class SIGRLogger:
         with open(reflection_file, 'w') as f:
             f.write(reflection)
 
+    def log_critique(self, critique: str):
+        """
+        Log Actor's self-critique.
+
+        Args:
+            critique: Self-critique text from LLM
+        """
+        if self.iter_dir is None:
+            raise RuntimeError("Must call start_iteration first")
+
+        critique_file = self.iter_dir / "self_critique.txt"
+        with open(critique_file, 'w') as f:
+            f.write(critique)
+
+    def log_advantage(self, advantage_info: Dict[str, Any]):
+        """
+        Log Critic's advantage estimation.
+
+        Args:
+            advantage_info: Dictionary with advantage, value, raw_reward
+        """
+        if self.iter_dir is None:
+            raise RuntimeError("Must call start_iteration first")
+
+        advantage_file = self.iter_dir / "critic_advantage.json"
+        with open(advantage_file, 'w') as f:
+            json.dump(advantage_info, f, indent=2)
+
+    def log_reward_breakdown(self, reward_info: Dict[str, Any]):
+        """
+        Log detailed reward breakdown.
+
+        Args:
+            reward_info: Dictionary with reward components
+        """
+        if self.iter_dir is None:
+            raise RuntimeError("Must call start_iteration first")
+
+        reward_file = self.iter_dir / "reward_breakdown.json"
+        with open(reward_file, 'w') as f:
+            json.dump(reward_info, f, indent=2)
+
     def save_iteration_summary(self, additional_info: Optional[Dict[str, Any]] = None):
         """
         Save summary for this iteration.

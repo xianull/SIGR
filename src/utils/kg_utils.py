@@ -156,28 +156,46 @@ def get_neighbors(
         neighbors = neighbors[:effective_max]
 
     elif method == 'weighted':
-        # Weight by score for PPI, otherwise use edge_type_weight as base
+        # Weight by score with temperature-based sampling
+        # edge_type_weight controls distribution sharpness (not eliminated by normalization)
         import random
         if neighbors:
+            # Get base scores for all neighbor types
             if edge_type == 'PPI':
-                # For PPI: combine combined_score with edge_type_weight
-                weights = [
-                    n[1].get('combined_score', 0.5) * edge_type_weight
+                # For PPI: use combined_score as base
+                base_weights = [
+                    max(0.1, n[1].get('combined_score', 0.5))
                     for n in neighbors
                 ]
             else:
-                # For non-PPI: use edge_type_weight as uniform weight
-                weights = [edge_type_weight] * len(neighbors)
+                # For non-PPI: try to use available score/evidence
+                base_weights = []
+                for n in neighbors:
+                    score = n[1].get('score', n[1].get('evidence_count', 1.0))
+                    if isinstance(score, (int, float)):
+                        base_weights.append(max(0.1, float(score)))
+                    else:
+                        base_weights.append(1.0)
+
+            # Apply temperature scaling based on edge_type_weight
+            # Higher weight = lower temperature = sharper distribution (more focused on high-score)
+            # Lower weight = higher temperature = flatter distribution (more uniform)
+            temperature = 1.0 / max(edge_type_weight, 0.1)
+            weights = [w ** (1.0 / temperature) for w in base_weights]
 
             total = sum(weights)
             if total > 0:
                 weights = [w / total for w in weights]
-                indices = random.choices(
-                    range(len(neighbors)),
-                    weights=weights,
-                    k=min(effective_max, len(neighbors))
-                )
-                neighbors = [neighbors[i] for i in indices]
+                # Use set to avoid duplicate sampling
+                selected_indices = set()
+                target_count = min(effective_max, len(neighbors))
+                max_attempts = len(neighbors) * 3
+                attempts = 0
+                while len(selected_indices) < target_count and attempts < max_attempts:
+                    idx = random.choices(range(len(neighbors)), weights=weights, k=1)[0]
+                    selected_indices.add(idx)
+                    attempts += 1
+                neighbors = [neighbors[i] for i in selected_indices]
             else:
                 random.shuffle(neighbors)
                 neighbors = neighbors[:effective_max]

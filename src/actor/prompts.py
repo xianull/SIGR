@@ -659,6 +659,13 @@ Use chain-of-thought reasoning to analyze the situation step by step.
 
 {optimization_hints}
 
+## CRITICAL: NO IMPROVEMENT = PENALTY
+**IMPORTANT**: The reward system penalizes stagnation. If you do not improve upon the current best metric:
+- Staying at the same performance = NEGATIVE REWARD (punishment)
+- The longer you stay without improvement, the HIGHER the penalty
+- You MUST try different configurations to escape local optima
+- Small conservative changes are likely to be punished!
+
 ## STEP 1: DIAGNOSE THE PROBLEM
 Current Reward: {reward:.4f}
 
@@ -678,10 +685,10 @@ Which past changes were INEFFECTIVE (hurt performance or had no effect)?
 {trend_analysis_section}
 
 Given the trend, should we:
-- EXPLORE: Try significantly different parameters (plateau/declining trend)
-- FINE-TUNE: Make small adjustments to current approach (improving trend)
+- EXPLORE: Try significantly different parameters (plateau/declining trend) - RECOMMENDED if no recent improvement
+- FINE-TUNE: Make small adjustments to current approach (only if actively improving)
 - PRESERVE: Keep successful elements, only fix weaknesses
-
+{edge_effects_section}
 ## STEP 4: IMPROVEMENT PLAN
 Current Strategy:
 - Edge types: {edge_types}
@@ -703,6 +710,7 @@ Based on Steps 1-3, propose improvements:
 - What specific parameter(s) to change?
 - Why this change addresses the root cause?
 - Expected effect of the change?
+- **If the trend is plateau or declining, you MUST make significant changes (>20% parameter modification)**
 
 ## STEP 5: OUTPUT STRATEGY
 Available parameters:
@@ -790,7 +798,8 @@ def get_reflection_cot_prompt(
     history: list,
     max_history: int = 3,
     trend_analysis: dict = None,
-    best_reward: float = None
+    best_reward: float = None,
+    edge_effects: dict = None
 ) -> str:
     """
     Generate the Chain-of-Thought enhanced reflection prompt.
@@ -804,6 +813,7 @@ def get_reflection_cot_prompt(
         max_history: Maximum number of history items to include
         trend_analysis: Optional trend analysis from TrendAnalyzer
         best_reward: Optional best reward for filtering effective history
+        edge_effects: Optional edge type effectiveness from Memory
 
     Returns:
         Formatted CoT reflection prompt
@@ -868,6 +878,26 @@ Reason: {trend_analysis.get('action_reason', 'N/A')}
     if optimization_hints:
         optimization_hints = f"## IMPORTANT - TASK-SPECIFIC OPTIMIZATION HINTS\n{optimization_hints}"
 
+    # Format edge effects section
+    edge_effects_section = ""
+    if edge_effects:
+        sorted_effects = sorted(
+            edge_effects.items(),
+            key=lambda x: x[1].get('ema_effect', 0),
+            reverse=True
+        )
+        effects_lines = []
+        for edge_type, effect in sorted_effects:
+            usage = effect.get('usage_count', 0)
+            success = effect.get('success_count', 0)
+            success_rate = success / max(usage, 1)
+            ema = effect.get('ema_effect', 0)
+            effects_lines.append(
+                f"  - {edge_type}: usage={usage}, success_rate={success_rate:.0%}, ema_effect={ema:+.4f}"
+            )
+        edge_effects_section = "\n## LEARNED EDGE EFFECTIVENESS (from Memory)\n" + "\n".join(effects_lines)
+        edge_effects_section += "\n(Higher ema_effect = better historical performance. Consider prioritizing high-ema edge types.)\n"
+
     return REFLECTION_COT_PROMPT_TEMPLATE.format(
         task_name=task_name,
         optimization_hints=optimization_hints,
@@ -888,5 +918,6 @@ Reason: {trend_analysis.get('action_reason', 'N/A')}
         reward=reward,
         feedback=feedback,
         history=history_str,
-        trend_analysis_section=trend_section
+        trend_analysis_section=trend_section,
+        edge_effects_section=edge_effects_section
     )

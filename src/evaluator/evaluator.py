@@ -491,3 +491,14 @@ class TaskEvaluator:
     def set_reward_weights(self, **kwargs):
         """Manually set reward weights."""
         self.reward_computer.set_weights(**kwargs)
+
+    def set_baseline_metric(self, metric: float):
+        """
+        Set the baseline metric for "no improvement = punishment" strategy.
+
+        Call this after iteration 1 to establish the baseline.
+
+        Args:
+            metric: Baseline metric value from iteration 1
+        """
+        self.reward_computer.set_baseline_metric(metric)
