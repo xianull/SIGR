@@ -82,7 +82,7 @@ class SIGRLogger:
         Creates iteration directory and prepares for logging.
 
         Args:
-            iteration: Iteration number (0-indexed)
+            iteration: Iteration number (1-based)
         """
         self.current_iteration = iteration
         self.iter_dir = self.log_dir / f"iteration_{iteration:03d}"

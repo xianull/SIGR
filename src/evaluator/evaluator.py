@@ -325,20 +325,18 @@ class TaskEvaluator:
             history: List of previous primary metric values (oldest to newest)
 
         Returns:
-            Reward value (can be negative for decline)
+            Reward value (normalized to [-1, 1])
         """
         current_metric = metrics.get(self.primary_metric, 0.0)
 
-        if history is not None and len(history) > 0:
-            result = self.reward_computer.compute(current_metric, history)
-            logger.debug(
-                f"Reward computed: total={result.total_reward:.4f}, "
-                f"relative={result.relative_reward:.4f}, raw={result.raw_metric:.4f}"
-            )
-            return result.total_reward
-        else:
-            # First iteration: return raw metric
-            return current_metric
+        # Always use RewardComputer for consistent normalization
+        # For first iteration (no history), it returns absolute_reward in [-1, 1]
+        result = self.reward_computer.compute(current_metric, history)
+        logger.debug(
+            f"Reward computed: total={result.total_reward:.4f}, "
+            f"relative={result.relative_reward:.4f}, raw={result.raw_metric:.4f}"
+        )
+        return result.total_reward
 
     def compute_reward_detailed(
         self,

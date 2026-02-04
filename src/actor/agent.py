@@ -9,6 +9,8 @@ Architecture:
 - Actor: LLM-based strategy proposer (π(a|s))
 - Critic: History-based value estimator (V(s))
 - Advantage: A(a,s) = r - V(s) for variance reduction
+- ParameterTracker: Tracks effect of each parameter on reward
+- UCBSelector: Intelligent exploration-exploitation for discrete params
 """
 
 import logging
@@ -17,6 +19,8 @@ from dataclasses import dataclass
 
 from .strategy import Strategy, StrategyConfig, get_default_strategy
 from .critic import SimpleCritic, AdvantageEstimate
+from .tracker import ParameterEffectTracker
+from .ucb import UCBSelector, MultiArmedBandit
 from .prompts import (
     TASK_INITIAL_PROMPTS,
     TASK_EDGE_PRIORITIES,
@@ -77,6 +81,8 @@ class ActorAgent:
         enable_consistency_check: bool = True,
         enable_cot_reasoning: bool = True,
         enable_critic: bool = True,
+        enable_parameter_tracking: bool = True,
+        enable_ucb_selection: bool = True,
     ):
         """
         Initialize the Actor-Critic Agent.
@@ -89,6 +95,8 @@ class ActorAgent:
             enable_consistency_check: Enable soft consistency guidance (default: True)
             enable_cot_reasoning: Use Chain-of-Thought prompts (default: True)
             enable_critic: Enable Critic for value estimation (default: True)
+            enable_parameter_tracking: Enable parameter effect tracking (default: True)
+            enable_ucb_selection: Enable UCB for discrete params (default: True)
         """
         self.llm = llm_client
         self.task_name = task_name
@@ -98,6 +106,8 @@ class ActorAgent:
         self.enable_consistency_check = enable_consistency_check
         self.enable_cot_reasoning = enable_cot_reasoning
         self.enable_critic = enable_critic
+        self.enable_parameter_tracking = enable_parameter_tracking
+        self.enable_ucb_selection = enable_ucb_selection
 
         # Initialize strategy
         if initial_strategy is not None:
@@ -107,6 +117,12 @@ class ActorAgent:
 
         # Initialize Critic
         self.critic = SimpleCritic() if enable_critic else None
+
+        # Initialize Parameter Effect Tracker
+        self.param_tracker = ParameterEffectTracker() if enable_parameter_tracking else None
+
+        # Initialize UCB Selector for discrete parameters
+        self.ucb_bandit = MultiArmedBandit() if enable_ucb_selection else None
 
         # History for policy learning
         self.history: List[HistoryEntry] = []
@@ -133,6 +149,8 @@ class ActorAgent:
         logger.info(f"  Consistency check (soft): {enable_consistency_check}")
         logger.info(f"  CoT reasoning: {enable_cot_reasoning}")
         logger.info(f"  Critic enabled: {enable_critic}")
+        logger.info(f"  Parameter tracking: {enable_parameter_tracking}")
+        logger.info(f"  UCB selection: {enable_ucb_selection}")
 
     def get_strategy(self) -> Dict[str, Any]:
         """
@@ -262,6 +280,20 @@ class ActorAgent:
             feedback=feedback
         ))
 
+        # Update Parameter Effect Tracker with raw_metric for consistent tracking
+        current_strategy_dict = self.current_strategy.to_dict()
+        if self.param_tracker and raw_metric is not None:
+            # Use raw_metric (AUC) for effect tracking - more consistent than composite reward
+            self.param_tracker.record(current_strategy_dict, raw_metric)
+            logger.debug("Parameter effects updated with raw_metric")
+
+        # Update UCB Bandit with normalized reward
+        if self.ucb_bandit and raw_metric is not None:
+            # Normalize reward to [0, 1] for UCB
+            normalized_reward = max(0.0, min(1.0, raw_metric))
+            self.ucb_bandit.update_all(current_strategy_dict, normalized_reward)
+            logger.debug(f"UCB updated with normalized reward: {normalized_reward:.4f}")
+
         # Track best strategy using raw_metric (not relative reward)
         # This ensures we keep the strategy with best absolute performance
         if raw_metric is None:
@@ -278,6 +310,13 @@ class ActorAgent:
             ))
             logger.info(f"New best strategy found with metric: {metric_for_comparison:.4f}")
 
+        # Generate guidance from trackers for LLM
+        tracker_guidance = ""
+        if self.param_tracker:
+            tracker_guidance += "\n\n" + self.param_tracker.get_guidance_for_llm()
+        if self.ucb_bandit:
+            tracker_guidance += "\n\n" + self.ucb_bandit.get_guidance()
+
         # Generate reflection prompt (use CoT if enabled)
         # Include advantage information if available
         advantage_context = ""
@@ -289,12 +328,15 @@ class ActorAgent:
                 f"- Interpretation: {'Strategy outperformed baseline' if advantage.advantage > 0 else 'Strategy underperformed baseline'}"
             )
 
+        # Combine all context for LLM
+        enhanced_feedback = feedback + advantage_context + tracker_guidance
+
         if self.enable_cot_reasoning:
             reflection_prompt = get_reflection_cot_prompt(
                 task_name=self.task_name,
                 strategy_dict=self.current_strategy.to_dict(),
                 reward=reward,
-                feedback=feedback + advantage_context,
+                feedback=enhanced_feedback,
                 history=[
                     {'strategy': h.strategy, 'reward': h.reward, 'feedback': h.feedback}
                     for h in self.history
@@ -307,7 +349,7 @@ class ActorAgent:
                 task_name=self.task_name,
                 strategy_dict=self.current_strategy.to_dict(),
                 reward=reward,
-                feedback=feedback + advantage_context,
+                feedback=enhanced_feedback,
                 history=[
                     {'strategy': h.strategy, 'reward': h.reward, 'feedback': h.feedback}
                     for h in self.history

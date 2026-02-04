@@ -105,7 +105,7 @@ class MDPState:
         if metric > self.best_metric:
             self.best_metric = metric
             self.best_strategy = deepcopy(strategy)
-            self.best_iteration = self.iteration - 1  # 0-indexed
+            self.best_iteration = self.iteration  # 1-based, consistent with main loop
             logger.info(
                 f"New best metric: {metric:.4f} at iteration {self.best_iteration}"
             )
