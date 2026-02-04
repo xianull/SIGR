@@ -403,9 +403,15 @@ class SIGRFramework:
         logger.info(f"Using fixed evaluation set: {len(eval_genes)} genes")
 
         # Generate embeddings for sampled genes (uses LLM)
-        embeddings, descriptions = self._generate_embeddings(
+        embeddings, descriptions, raw_descriptions = self._generate_embeddings(
             eval_genes, strategy
         )
+
+        # Store raw descriptions for analysis (optional)
+        if hasattr(self, '_raw_descriptions'):
+            self._raw_descriptions.update(raw_descriptions)
+        else:
+            self._raw_descriptions = raw_descriptions
 
         # Use common evaluation logic
         return self._evaluate_and_update(
@@ -638,6 +644,7 @@ class SIGRFramework:
             reward,
             feedback,
             raw_metric=reward_result.raw_metric,
+            strategy_dict=strategy,  # Pass full strategy dict (includes is_baseline)
             trend_analysis=trend_analysis,
             kgbook_suggestions=memory_suggestions
         )
@@ -730,7 +737,7 @@ CONSTRAINTS:
         self,
         gene_ids: List[str],
         strategy: Dict[str, Any]
-    ) -> tuple:
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, str], Dict[str, str]]:
         """
         Generate embeddings for a list of genes.
 
@@ -744,8 +751,11 @@ CONSTRAINTS:
 
         Returns:
             Tuple of (embeddings dict, descriptions dict)
+            descriptions dict contains filtered descriptions
+            Raw descriptions are saved separately
         """
-        descriptions = {}
+        descriptions = {}  # Filtered descriptions (for encoding)
+        raw_descriptions = {}  # Original descriptions (for analysis)
 
         # Validate and build extraction strategy
         extraction_strategy = self._validate_and_build_strategy(strategy)
@@ -774,16 +784,18 @@ CONSTRAINTS:
                 )
 
                 # Generate description with strategy parameters
-                description = self.generator.generate(
+                # Return both filtered and original
+                filtered_desc, raw_desc = self.generator.generate(
                     gene_id=gene_id,
                     subgraph=subgraph,
                     prompt_template=strategy.get('prompt_template', ''),
                     kg=self.kg,
-                    strategy=strategy  # Pass full strategy for description_length, focus_keywords, etc.
+                    strategy=strategy,
+                    return_both=True
                 )
-                return (gene_id, description, None)
+                return (gene_id, filtered_desc, raw_desc, None)
             except Exception as e:
-                return (gene_id, None, str(e))
+                return (gene_id, None, None, str(e))
 
         # Use ThreadPoolExecutor for concurrent LLM requests
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -796,9 +808,10 @@ CONSTRAINTS:
             for future in tqdm(as_completed(futures), total=len(gene_ids),
                               desc="Generating descriptions (LLM)"):
                 try:
-                    gene_id, description, error = future.result()
-                    if description is not None:
-                        descriptions[gene_id] = description
+                    gene_id, filtered_desc, raw_desc, error = future.result()
+                    if filtered_desc is not None:
+                        descriptions[gene_id] = filtered_desc
+                        raw_descriptions[gene_id] = raw_desc
                     else:
                         logger.warning(f"Error generating description for {gene_id}: {error}")
                 except Exception as e:
@@ -808,9 +821,9 @@ CONSTRAINTS:
 
         if not descriptions:
             logger.warning("No descriptions generated")
-            return {}, {}
+            return {}, {}, {}
 
-        # Phase 2: Batch encode all descriptions
+        # Phase 2: Batch encode all descriptions (using filtered descriptions)
         logger.info(f"Phase 2: Encoding {len(descriptions)} descriptions...")
         embeddings = self.encoder.encode_genes(
             descriptions,
@@ -819,7 +832,7 @@ CONSTRAINTS:
         )
 
         logger.info(f"Generated {len(embeddings)} embeddings")
-        return embeddings, descriptions
+        return embeddings, descriptions, raw_descriptions
 
     def _save_best_strategy(self, strategy: Dict[str, Any], reward: float):
         """Save best strategy to results directory."""
@@ -858,7 +871,7 @@ CONSTRAINTS:
         if gene_ids is None:
             gene_ids = random.sample(self.task_genes, min(sample_size, len(self.task_genes)))
 
-        embeddings, _ = self._generate_embeddings(gene_ids, strategy)
+        embeddings, _, _ = self._generate_embeddings(gene_ids, strategy)
         return self.evaluator.evaluate(embeddings)
 
     def save_checkpoint(self, iteration: int, checkpoint_dir: str = None) -> str:

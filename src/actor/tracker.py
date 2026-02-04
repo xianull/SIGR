@@ -16,8 +16,12 @@ class ParameterEffectTracker:
     """
     Tracks the effect of each parameter value on reward.
 
-    Uses exponential moving average to smooth effects over time,
-    giving more weight to recent observations.
+    Uses exponential moving average (EMA) to smooth effects over time.
+    Formula: new_effect = history_weight * old_effect + (1 - history_weight) * new_delta
+
+    With default history_weight=0.8:
+    - 80% weight to historical average
+    - 20% weight to new observation
     """
 
     # Parameters to track (discrete and continuous)
@@ -35,21 +39,24 @@ class ParameterEffectTracker:
         'include_statistics', # True/False
     ]
 
-    def __init__(self, decay: float = 0.8):
+    def __init__(self, history_weight: float = 0.8):
         """
         Initialize the tracker.
 
         Args:
-            decay: Decay factor for exponential moving average (0-1).
-                   Higher values give more weight to historical data.
+            history_weight: Weight for historical data in EMA (0-1).
+                           0.8 means 80% history, 20% new observation.
+                           Higher = more stable but slower to adapt.
+                           Lower = more responsive but noisier.
         """
-        self.decay = decay
+        self.history_weight = history_weight
         self.effects: Dict[str, Dict[str, float]] = defaultdict(dict)
         self.counts: Dict[str, Dict[str, int]] = defaultdict(dict)
         self.last_strategy: Optional[Dict[str, Any]] = None
-        self.last_reward: Optional[float] = None
+        self.last_metric: Optional[float] = None  # Last non-baseline metric
+        self.baseline_metric: Optional[float] = None  # Baseline metric as reference
 
-        logger.info(f"ParameterEffectTracker initialized with decay={decay}")
+        logger.info(f"ParameterEffectTracker initialized with history_weight={history_weight}")
 
     def _normalize_value(self, value: Any) -> str:
         """Convert parameter value to string key."""
@@ -62,19 +69,36 @@ class ParameterEffectTracker:
         else:
             return str(value)
 
-    def record(self, strategy: Dict[str, Any], reward: float):
+    def record(self, strategy: Dict[str, Any], metric: float):
         """
-        Record the effect of a strategy on reward.
+        Record the effect of a strategy on metric.
 
         Args:
             strategy: Current strategy dictionary
-            reward: Reward received for this strategy
+            metric: Raw metric (e.g., AUC) for this strategy
         """
-        # Calculate delta reward (improvement over last iteration)
-        if self.last_reward is not None:
-            delta = reward - self.last_reward
+        is_baseline = strategy.get('is_baseline', False)
+
+        if is_baseline:
+            # Baseline: save metric as reference, but don't record strategy effects
+            self.baseline_metric = metric
+            logger.debug(f"Baseline metric saved as reference: {metric:.4f}")
+            return
+
+        # Calculate delta (metric improvement)
+        if self.last_metric is not None:
+            # Normal case: compare with last LLM strategy
+            delta = metric - self.last_metric
+        elif self.baseline_metric is not None:
+            # First LLM strategy: compare with baseline
+            delta = metric - self.baseline_metric
+            logger.debug(
+                f"First LLM strategy: delta = {metric:.4f} - {self.baseline_metric:.4f} = {delta:.4f}"
+            )
         else:
-            delta = reward  # First iteration, use absolute reward
+            # No reference point: use delta = 0 (conservative)
+            delta = 0.0
+            logger.warning("No reference metric available, using delta=0")
 
         # Update effects for each tracked parameter
         for param in self.TRACKED_PARAMS:
@@ -92,7 +116,8 @@ class ParameterEffectTracker:
             if old_count == 0:
                 new_effect = delta
             else:
-                new_effect = self.decay * old_effect + (1 - self.decay) * delta
+                # EMA: history_weight * old + (1 - history_weight) * new
+                new_effect = self.history_weight * old_effect + (1 - self.history_weight) * delta
 
             self.effects[param][value_key] = new_effect
             self.counts[param][value_key] = old_count + 1
@@ -104,7 +129,7 @@ class ParameterEffectTracker:
 
         # Store for next iteration
         self.last_strategy = strategy.copy()
-        self.last_reward = reward
+        self.last_metric = metric
 
     def get_best_values(self, param: str, top_k: int = 3) -> List[Tuple[str, float]]:
         """
@@ -241,5 +266,6 @@ class ParameterEffectTracker:
         self.effects.clear()
         self.counts.clear()
         self.last_strategy = None
-        self.last_reward = None
+        self.last_metric = None
+        self.baseline_metric = None
         logger.info("ParameterEffectTracker reset")

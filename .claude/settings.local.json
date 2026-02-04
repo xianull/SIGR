@@ -19,7 +19,8 @@
       "Bash(wc:*)",
       "Bash(uniq:*)",
       "Bash(head:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "WebFetch(domain:www.biorxiv.org)"
     ]
   }
 }

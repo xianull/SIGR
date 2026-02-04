@@ -10,9 +10,11 @@ from .kg_utils import (
 
 from .filter import (
     filter_description,
+    filter_description_simple,
     validate_description,
     sanitize_for_task,
     is_safe_description,
+    FilterResult,
 )
 
 from .logger import SIGRLogger, setup_logging
@@ -26,9 +28,11 @@ __all__ = [
     "get_kg_summary",
     # Filter utilities
     "filter_description",
+    "filter_description_simple",
     "validate_description",
     "sanitize_for_task",
     "is_safe_description",
+    "FilterResult",
     # Logger
     "SIGRLogger",
     "setup_logging",

@@ -155,12 +155,13 @@ class SimpleCritic:
             recent = metric_history[-5:]
             mean_val = np.mean(recent)
             std_val = np.std(recent)
-            if mean_val > 0:
+            # Avoid division by near-zero
+            if mean_val > 1e-8:
                 cv = std_val / mean_val
                 # Low CV = high consistency = high value
                 consistency = 1.0 - min(cv * 2, 1.0)  # Scale CV
             else:
-                consistency = 0.5
+                consistency = 0.5  # Conservative when mean is near zero
         else:
             consistency = 0.5
         components['consistency'] = consistency
@@ -227,12 +228,17 @@ class SimpleCritic:
         Since we don't have V(s') yet, we use:
         A(a,s) ≈ r - V(s) (immediate advantage)
 
+        Note: All values are normalized to [-1, 1] range for consistency.
+        - reward: should be normalized [-1, 1]
+        - metric_history: raw metrics [0, 1] (normalized internally)
+        - state_value: output is [-1, 1]
+
         Args:
-            reward: Immediate reward received
-            metric_history: Historical metrics
+            reward: Immediate reward received (normalized to [-1, 1])
+            metric_history: Historical raw metrics [0, 1]
             trend: Current trend
-            best_metric: Best metric so far
-            current_metric: Current metric
+            best_metric: Best raw metric so far [0, 1]
+            current_metric: Current raw metric [0, 1]
             gamma: Discount factor
 
         Returns:
@@ -242,11 +248,10 @@ class SimpleCritic:
             metric_history, trend, best_metric, current_metric
         )
 
-        # Approximate Q-value as immediate reward
-        # This is a simplification; ideally we'd bootstrap with V(s')
+        # Use reward as action value (both should be in [-1, 1] range)
         action_value = reward
 
-        # Advantage = Q - V
+        # Advantage = Q - V (both in [-1, 1] range)
         advantage = action_value - state_value.value
 
         # Clip advantage for stability

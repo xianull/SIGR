@@ -7,59 +7,156 @@ Preserves implicit biological information that supports downstream learning.
 Key principle:
 - KEEP: Factual biological descriptions (implicit signals)
   e.g., "involved in cell cycle regulation", "highly conserved", "hub in PPI network"
-- FILTER: Direct predictions and explicit labels
+- FILTER: Direct predictions and explicit labels ONLY
   e.g., "is essential", "is dosage sensitive", "is a marker for X cells"
 """
 
 import re
 import logging
-from typing import List, Tuple
+from typing import List, Tuple, Dict
+from dataclasses import dataclass
 
 
 logger = logging.getLogger(__name__)
 
 
-# Forbidden patterns - ONLY filter explicit predictions and direct labels
-# These patterns indicate direct label leakage, not biological facts
-FORBIDDEN_PATTERNS: List[Tuple[str, str]] = [
-    # === Predictive/speculative statements (always filter) ===
-    (r'\b(likely|probably|possibly)\s+(is|to be|will|would)\s+(a|an)?\s*(essential|sensitive|marker)', 'predictive label'),
-    (r'\bpredicted\s+(as|to be)\s+(a|an)?\s*\w+', 'prediction'),
-    (r'\bclassified\s+as\s+(a|an)?\s*\w+', 'classification'),
-    (r'\bI\s+(predict|believe|think|conclude)\b', 'speculation'),
+@dataclass
+class FilterResult:
+    """Result of filtering a description."""
+    original: str  # Original description
+    filtered: str  # Filtered description
+    changes_made: int  # Number of patterns filtered
+    filtered_patterns: List[str]  # List of filtered pattern types
 
-    # === Direct label declarations (filter explicit labels only) ===
-    # Dosage sensitivity - explicit labels only
+
+# Forbidden patterns - ONLY filter explicit labels that directly reveal the answer
+# These patterns indicate direct label leakage
+FORBIDDEN_PATTERNS: List[Tuple[str, str]] = [
+    # === Explicit dosage sensitivity labels ===
     (r'\b(is|are)\s+(a\s+)?(haploinsufficient|haplosufficient)\s*(gene)?\b', 'explicit dosage label'),
     (r'\b(is|are)\s+(a\s+)?dosage[- ]?(sensitive|insensitive)\b', 'explicit dosage label'),
+    (r'\bthis\s+gene\s+is\s+(not\s+)?(dosage[- ]?)?(sensitive|insensitive)\b', 'explicit dosage answer'),
+
+    # === Explicit essentiality labels ===
     (r'\b(is|are)\s+(a\s+|an\s+)?(essential|non-?essential)\s+gene\b', 'explicit essentiality label'),
-    (r'\bthis\s+(gene\s+)?is\s+(an?\s+)?essential\s+gene\b', 'explicit essentiality'),
+    (r'\bthis\s+(gene\s+)?is\s+(an?\s+)?essential\b', 'explicit essentiality'),
+    (r'\bthis\s+gene\s+is\s+(not\s+)?essential\b', 'explicit essentiality answer'),
 
-    # Cell marker - explicit labels only
+    # === Explicit cell marker labels ===
     (r'\b(is|are)\s+(a\s+)?(specific\s+)?marker\s+(for|of)\s+\w+\s*(cells?)?\b', 'explicit marker label'),
-    (r'\b(is|are)\s+specifically\s+expressed\s+in\s+\w+\s+cells?\b', 'explicit cell specificity'),
+    (r'\bthis\s+gene\s+is\s+(a\s+)?marker\s+for\b', 'explicit marker answer'),
 
-    # Gene type - explicit classification only
-    (r'\b(is|are)\s+(a\s+)?(known\s+)?(oncogene|tumor\s+suppressor|proto-?oncogene)\b', 'explicit gene type'),
-    (r'\bthis\s+(is|gene\s+is)\s+(a|an)\s+(kinase|receptor|enzyme|transporter)\b', 'explicit functional type'),
-
-    # Chromatin state - explicit state labels only
+    # === Explicit bivalent/chromatin state labels ===
     (r'\b(is|are|has)\s+(a\s+)?bivalent\s+(chromatin\s+)?(state|domain|promoter)?\b', 'explicit bivalent label'),
-    (r'\b(is|are)\s+(un)?methylated\s+at\s+(the\s+)?promoter\b', 'explicit methylation label'),
+    (r'\bthis\s+gene\s+(has|is)\s+(not\s+)?bivalent\b', 'explicit bivalent answer'),
 
-    # === Probability/confidence statements ===
-    (r'\bprobability\s+of\s+being\b', 'probability statement'),
-    (r'\b\d+(\.\d+)?%\s+(chance|probability|confidence)\b', 'percentage prediction'),
-    # Removed: confidence score rule was too aggressive and filtered database scores
+    # === Explicit gene type classifications (oncogene/tumor suppressor) ===
+    (r'\b(is|are)\s+(a\s+)?(known\s+)?(oncogene|tumor\s+suppressor)\b', 'explicit gene type'),
 
-    # === Future tense predictions ===
-    (r'\bwill\s+(likely\s+)?(be|interact|bind|cause)\b', 'future prediction'),
-    (r'\bwould\s+(likely\s+)?(be|interact|bind|cause)\b', 'conditional prediction'),
+    # === Direct predictions with "I predict/believe" ===
+    (r'\bI\s+(predict|believe|think|conclude)\s+(that\s+)?(this|it|the)\b', 'speculation'),
 
-    # === Direct answers to task questions ===
+    # === Direct yes/no answers ===
     (r'\b(yes|no),?\s+(this\s+gene\s+)?(is|does|will|can)\b', 'direct answer'),
-    (r'\b(positive|negative)\s+(for|sample|case)\b', 'sample classification'),
 ]
+
+
+def filter_description(description: str, strict: bool = True) -> FilterResult:
+    """
+    Filter LLM-generated description to remove EXPLICIT label leakage.
+
+    Preserves implicit biological information while removing direct predictions.
+
+    Args:
+        description: Raw LLM-generated description
+        strict: If True, replace forbidden patterns; if False, just log warnings
+
+    Returns:
+        FilterResult with original, filtered description and change details
+    """
+    if not description:
+        return FilterResult(
+            original="",
+            filtered="",
+            changes_made=0,
+            filtered_patterns=[]
+        )
+
+    filtered = description
+    replacements_made = 0
+    filtered_patterns = []
+
+    for pattern, reason in FORBIDDEN_PATTERNS:
+        matches = list(re.finditer(pattern, filtered, re.IGNORECASE))
+
+        if matches:
+            if strict:
+                filtered = re.sub(pattern, '', filtered, flags=re.IGNORECASE)
+                replacements_made += len(matches)
+                filtered_patterns.append(reason)
+                logger.warning(f"Filtered explicit label: '{reason}' - {matches[0].group()}")
+            else:
+                logger.warning(f"Found potential leakage ({reason}): {matches[0].group()}")
+
+    if replacements_made > 0:
+        logger.info(f"Removed {replacements_made} explicit label(s) from description")
+
+    # Clean up artifacts from removal
+    filtered = re.sub(r'\s+', ' ', filtered)  # Multiple spaces
+    filtered = re.sub(r'\.\s*\.', '.', filtered)  # Double periods
+    filtered = re.sub(r',\s*,', ',', filtered)  # Double commas
+    filtered = re.sub(r'^\s*[,\.]\s*', '', filtered)  # Leading punctuation
+    filtered = re.sub(r'\s*[,\.]\s*$', '.', filtered)  # Clean trailing
+
+    return FilterResult(
+        original=description,
+        filtered=filtered.strip(),
+        changes_made=replacements_made,
+        filtered_patterns=filtered_patterns
+    )
+
+
+def filter_description_simple(description: str, strict: bool = True) -> str:
+    """
+    Simple version that returns only the filtered string.
+
+    For backward compatibility.
+
+    Args:
+        description: Raw description
+        strict: Whether to apply strict filtering
+
+    Returns:
+        Filtered description string
+    """
+    result = filter_description(description, strict)
+    return result.filtered
+
+
+def validate_description(description: str) -> Tuple[bool, List[str]]:
+    """
+    Validate that a description doesn't contain explicit label leakage.
+
+    Args:
+        description: Description to validate
+
+    Returns:
+        Tuple of (is_valid, list of issues found)
+    """
+    issues = []
+
+    for pattern, reason in FORBIDDEN_PATTERNS:
+        matches = re.findall(pattern, description, re.IGNORECASE)
+        if matches:
+            issues.append(f"{reason}: {matches}")
+
+    is_valid = len(issues) == 0
+
+    if not is_valid:
+        logger.warning(f"Description has {len(issues)} explicit label(s)")
+
+    return is_valid, issues
+
 
 # Patterns that are ACCEPTABLE - biological facts (implicit signals)
 # These should NOT be filtered as they provide useful implicit information
@@ -88,79 +185,13 @@ ACCEPTABLE_PATTERNS: List[Tuple[str, str]] = [
     (r'\bchromatin\s+accessibility\b', 'chromatin state - OK'),
     (r'\bpromoter\s+region\b', 'genomic feature - OK'),
 
-    # Functional descriptions
+    # Functional descriptions (always OK)
     (r'\bkinase\s+activity\b', 'enzymatic activity - OK'),
     (r'\bbinding\s+(domain|site|capacity)\b', 'structural feature - OK'),
     (r'\bsignaling\s+pathway\b', 'pathway - OK'),
+    (r'\bclassified\s+as\s+(a\s+)?\w+', 'functional classification - OK'),
+    (r'\bprobability\b', 'statistical term - OK'),
 ]
-
-
-def filter_description(description: str, strict: bool = True) -> str:
-    """
-    Filter LLM-generated description to remove EXPLICIT label leakage.
-
-    Preserves implicit biological information while removing direct predictions.
-
-    Args:
-        description: Raw LLM-generated description
-        strict: If True, replace forbidden patterns; if False, just log warnings
-
-    Returns:
-        Filtered description
-    """
-    if not description:
-        return ""
-
-    filtered = description
-    replacements_made = 0
-
-    for pattern, reason in FORBIDDEN_PATTERNS:
-        matches = list(re.finditer(pattern, filtered, re.IGNORECASE))
-
-        if matches:
-            if strict:
-                filtered = re.sub(pattern, '[REDACTED]', filtered, flags=re.IGNORECASE)
-                replacements_made += len(matches)
-                logger.warning(f"Filtered explicit label: '{reason}' - {matches[0].group()}")
-            else:
-                logger.warning(f"Found potential leakage ({reason}): {matches[0].group()}")
-
-    if replacements_made > 0:
-        logger.info(f"Removed {replacements_made} explicit label(s) from description")
-
-    # Clean up multiple [REDACTED] markers
-    filtered = re.sub(r'(\[REDACTED\]\s*)+', '', filtered)
-
-    # Remove empty sentences
-    filtered = re.sub(r'\.\s*\.', '.', filtered)
-    filtered = re.sub(r'\s+', ' ', filtered)
-
-    return filtered.strip()
-
-
-def validate_description(description: str) -> Tuple[bool, List[str]]:
-    """
-    Validate that a description doesn't contain explicit label leakage.
-
-    Args:
-        description: Description to validate
-
-    Returns:
-        Tuple of (is_valid, list of issues found)
-    """
-    issues = []
-
-    for pattern, reason in FORBIDDEN_PATTERNS:
-        matches = re.findall(pattern, description, re.IGNORECASE)
-        if matches:
-            issues.append(f"{reason}: {matches}")
-
-    is_valid = len(issues) == 0
-
-    if not is_valid:
-        logger.warning(f"Description has {len(issues)} explicit label(s)")
-
-    return is_valid, issues
 
 
 def check_implicit_signals(description: str) -> List[str]:
@@ -184,7 +215,7 @@ def check_implicit_signals(description: str) -> List[str]:
     return signals
 
 
-def sanitize_for_task(description: str, task_name: str) -> str:
+def sanitize_for_task(description: str, task_name: str) -> FilterResult:
     """
     Apply task-specific sanitization.
 
@@ -196,13 +227,13 @@ def sanitize_for_task(description: str, task_name: str) -> str:
         task_name: Name of the downstream task
 
     Returns:
-        Sanitized description
+        FilterResult with original and sanitized description
     """
     # First apply general filtering
-    sanitized = filter_description(description)
+    result = filter_description(description)
+    sanitized = result.filtered
 
     # Task-specific EXPLICIT patterns to filter
-    # These are direct answers to the task question
     task_explicit_patterns = {
         'ppi': [
             (r'\b(does|will)\s+(not\s+)?interact\s+with\b', 'explicit PPI answer'),
@@ -211,20 +242,22 @@ def sanitize_for_task(description: str, task_name: str) -> str:
             (r'\b(does|will)\s+(not\s+)?interact\s+with\b', 'explicit GGI answer'),
         ],
         'geneattribute_dosage_sensitivity': [
-            (r'\bthis\s+gene\s+is\s+(not\s+)?(dosage\s+)?sensitive\b', 'explicit dosage answer'),
+            # Already covered in general patterns
         ],
         'geneattribute_bivalent': [
-            (r'\bthis\s+gene\s+(has|is)\s+(not\s+)?bivalent\b', 'explicit bivalent answer'),
+            # Already covered in general patterns
         ],
         'cell': [
-            (r'\bthis\s+gene\s+is\s+(a\s+)?marker\s+for\b', 'explicit marker answer'),
+            # Already covered in general patterns
         ],
     }
 
+    additional_filtered = []
     if task_name in task_explicit_patterns:
         for pattern, reason in task_explicit_patterns[task_name]:
             if re.search(pattern, sanitized, re.IGNORECASE):
                 sanitized = re.sub(pattern, '', sanitized, flags=re.IGNORECASE)
+                additional_filtered.append(reason)
                 logger.warning(f"Removed task-specific explicit label: {reason}")
 
     # Log implicit signals for analysis (not filtered)
@@ -232,7 +265,12 @@ def sanitize_for_task(description: str, task_name: str) -> str:
     if signals:
         logger.debug(f"Implicit signals preserved: {signals}")
 
-    return sanitized
+    return FilterResult(
+        original=description,
+        filtered=sanitized.strip(),
+        changes_made=result.changes_made + len(additional_filtered),
+        filtered_patterns=result.filtered_patterns + additional_filtered
+    )
 
 
 def is_safe_description(description: str) -> bool:

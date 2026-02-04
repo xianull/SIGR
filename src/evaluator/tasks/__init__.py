@@ -6,6 +6,7 @@ from .genetype_task import GeneTypeTask
 from .geneattribute_task import GeneAttributeTask
 from .ggi_task import GGITask
 from .cell_task import CellTask
+from .perturbation_task import PerturbationTask
 
 __all__ = [
     "BaseTask",
@@ -14,4 +15,5 @@ __all__ = [
     "GeneAttributeTask",
     "GGITask",
     "CellTask",
+    "PerturbationTask",
 ]

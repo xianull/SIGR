@@ -14,12 +14,22 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RewardWeights:
-    """Configurable reward computation weights."""
-    baseline_weight: float = 0.3
-    relative_weight: float = 0.5
-    raw_weight: float = 0.2
-    improvement_bonus: float = 0.1
-    plateau_penalty: float = -0.02
+    """Configurable reward computation weights.
+
+    Default weights emphasize absolute performance:
+    - baseline_weight: 0.10 (comparison to moving average)
+    - relative_weight: 0.10 (improvement over previous iteration)
+    - raw_weight: 0.80 (absolute performance - primary signal)
+    Sum = 1.0
+
+    This design rewards high absolute performance strongly,
+    while keeping relative/baseline comparisons as minor adjustments.
+    """
+    baseline_weight: float = 0.10
+    relative_weight: float = 0.10
+    raw_weight: float = 0.80
+    improvement_bonus: float = 0.0  # Deprecated, kept for compatibility
+    plateau_penalty: float = -0.05
 
     def to_dict(self) -> Dict[str, float]:
         return {
@@ -33,11 +43,11 @@ class RewardWeights:
     @classmethod
     def from_dict(cls, data: Dict[str, float]) -> 'RewardWeights':
         return cls(
-            baseline_weight=data.get('baseline_weight', 0.3),
-            relative_weight=data.get('relative_weight', 0.5),
-            raw_weight=data.get('raw_weight', 0.2),
-            improvement_bonus=data.get('improvement_bonus', 0.1),
-            plateau_penalty=data.get('plateau_penalty', -0.02),
+            baseline_weight=data.get('baseline_weight', 0.10),
+            relative_weight=data.get('relative_weight', 0.10),
+            raw_weight=data.get('raw_weight', 0.80),
+            improvement_bonus=data.get('improvement_bonus', 0.0),
+            plateau_penalty=data.get('plateau_penalty', -0.05),
         )
 
     def validate(self) -> bool:
@@ -63,68 +73,78 @@ class RewardWeights:
 
 
 # Task-specific default weights
-# Different tasks may benefit from different reward shaping
+# All tasks now emphasize absolute performance (raw_weight=0.80)
+# with minor adjustments for relative improvement and baseline comparison
 TASK_REWARD_WEIGHTS: Dict[str, RewardWeights] = {
-    # PPI: Focus more on relative improvement (interaction patterns are complex)
+    # PPI: High absolute weight, some relative for interaction patterns
     'ppi': RewardWeights(
-        baseline_weight=0.25,
-        relative_weight=0.55,
-        raw_weight=0.20,
-        improvement_bonus=0.12,
-        plateau_penalty=-0.03,
+        baseline_weight=0.10,
+        relative_weight=0.10,
+        raw_weight=0.80,
+        improvement_bonus=0.0,
+        plateau_penalty=-0.05,
     ),
-    # Gene type: Balanced weights (multi-class classification)
+    # Gene type: Same emphasis on absolute performance
     'genetype': RewardWeights(
-        baseline_weight=0.30,
-        relative_weight=0.50,
-        raw_weight=0.20,
-        improvement_bonus=0.10,
-        plateau_penalty=-0.02,
+        baseline_weight=0.10,
+        relative_weight=0.10,
+        raw_weight=0.80,
+        improvement_bonus=0.0,
+        plateau_penalty=-0.05,
     ),
     # GGI: Similar to PPI
     'ggi': RewardWeights(
-        baseline_weight=0.25,
-        relative_weight=0.55,
-        raw_weight=0.20,
-        improvement_bonus=0.12,
-        plateau_penalty=-0.03,
+        baseline_weight=0.10,
+        relative_weight=0.10,
+        raw_weight=0.80,
+        improvement_bonus=0.0,
+        plateau_penalty=-0.05,
     ),
-    # Cell: Higher raw weight (clustering quality matters)
+    # Cell: High absolute weight (clustering quality matters)
     'cell': RewardWeights(
-        baseline_weight=0.25,
-        relative_weight=0.45,
-        raw_weight=0.30,
-        improvement_bonus=0.08,
-        plateau_penalty=-0.02,
+        baseline_weight=0.10,
+        relative_weight=0.10,
+        raw_weight=0.80,
+        improvement_bonus=0.0,
+        plateau_penalty=-0.05,
     ),
-    # Gene attributes: Focus on relative improvement
+    # Gene attributes: High absolute weight
     'geneattribute_dosage_sensitivity': RewardWeights(
-        baseline_weight=0.25,
-        relative_weight=0.55,
-        raw_weight=0.20,
-        improvement_bonus=0.15,
-        plateau_penalty=-0.03,
+        baseline_weight=0.10,
+        relative_weight=0.10,
+        raw_weight=0.80,
+        improvement_bonus=0.0,
+        plateau_penalty=-0.05,
     ),
     'geneattribute_lys4_only': RewardWeights(
-        baseline_weight=0.25,
-        relative_weight=0.55,
-        raw_weight=0.20,
-        improvement_bonus=0.12,
-        plateau_penalty=-0.02,
+        baseline_weight=0.10,
+        relative_weight=0.10,
+        raw_weight=0.80,
+        improvement_bonus=0.0,
+        plateau_penalty=-0.05,
     ),
     'geneattribute_no_methylation': RewardWeights(
-        baseline_weight=0.25,
-        relative_weight=0.55,
-        raw_weight=0.20,
-        improvement_bonus=0.12,
-        plateau_penalty=-0.02,
+        baseline_weight=0.10,
+        relative_weight=0.10,
+        raw_weight=0.80,
+        improvement_bonus=0.0,
+        plateau_penalty=-0.05,
     ),
     'geneattribute_bivalent': RewardWeights(
-        baseline_weight=0.25,
-        relative_weight=0.55,
-        raw_weight=0.20,
-        improvement_bonus=0.12,
-        plateau_penalty=-0.02,
+        baseline_weight=0.10,
+        relative_weight=0.10,
+        raw_weight=0.80,
+        improvement_bonus=0.0,
+        plateau_penalty=-0.05,
+    ),
+    # Perturbation: Regression task, very high absolute weight
+    # since correlation is a meaningful absolute metric
+    'perturbation': RewardWeights(
+        baseline_weight=0.05,
+        relative_weight=0.10,
+        raw_weight=0.85,  # Even higher for regression
+        improvement_bonus=0.0,
+        plateau_penalty=-0.05,
     ),
 }
 

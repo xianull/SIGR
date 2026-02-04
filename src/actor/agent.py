@@ -205,6 +205,7 @@ class ActorAgent:
         reward: float,
         feedback: str,
         raw_metric: Optional[float] = None,
+        strategy_dict: Optional[Dict[str, Any]] = None,
         trend_analysis: Optional[Dict[str, Any]] = None,
         kgbook_suggestions: Optional[str] = None
     ):
@@ -223,14 +224,24 @@ class ActorAgent:
             reward: Reward value from evaluator (normalized to [-1, 1])
             feedback: Natural language feedback from evaluator
             raw_metric: Original metric value (for best strategy tracking)
+            strategy_dict: Full strategy dict including is_baseline flag
             trend_analysis: Optional trend analysis dict for trend-aware reflection
             kgbook_suggestions: Optional KGBOOK suggestions when plateaued
         """
+        # Check for baseline iteration - only record metric, skip policy update
+        is_baseline = strategy_dict.get('is_baseline', False) if strategy_dict else False
+        if is_baseline:
+            if self.param_tracker and raw_metric is not None:
+                self.param_tracker.record(strategy_dict, raw_metric)
+            logger.info("Baseline iteration: skipping policy update, metric recorded as reference")
+            return
+
         logger.info(f"Updating policy with reward: {reward:.4f}")
 
         # Track consecutive declines for rollback mechanism
         if raw_metric is not None and self._last_raw_metric is not None:
-            if raw_metric < self._last_raw_metric - 0.001:  # Small tolerance for numerical stability
+            # Use 0.01 threshold (~1% relative change) to avoid false triggers from noise
+            if raw_metric < self._last_raw_metric - 0.01:
                 self._consecutive_decline_count += 1
                 logger.debug(f"Consecutive decline count: {self._consecutive_decline_count}")
             else:
@@ -283,10 +294,11 @@ class ActorAgent:
         ))
 
         # Update Parameter Effect Tracker with raw_metric for consistent tracking
-        current_strategy_dict = self.current_strategy.to_dict()
+        # Use strategy_dict if provided (contains is_baseline), otherwise use current_strategy
+        tracker_strategy = strategy_dict if strategy_dict else self.current_strategy.to_dict()
         if self.param_tracker and raw_metric is not None:
             # Use raw_metric (AUC) for effect tracking - more consistent than composite reward
-            self.param_tracker.record(current_strategy_dict, raw_metric)
+            self.param_tracker.record(tracker_strategy, raw_metric)
             logger.debug("Parameter effects updated with raw_metric")
 
         # Update UCB Bandit with normalized reward

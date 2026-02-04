@@ -5,7 +5,7 @@ Uses LLM to convert KG subgraphs into natural language gene descriptions.
 """
 
 import logging
-from typing import Dict, Any, Optional, Protocol, List
+from typing import Dict, Any, Optional, Protocol, List, Tuple
 
 import networkx as nx
 
@@ -96,8 +96,9 @@ class TextGenerator:
         subgraph: nx.DiGraph,
         prompt_template: str,
         kg: Optional[nx.DiGraph] = None,
-        strategy: Optional[Dict[str, Any]] = None
-    ) -> str:
+        strategy: Optional[Dict[str, Any]] = None,
+        return_both: bool = False
+    ) -> str | Tuple[str, str]:
         """
         Generate a description for a gene based on its subgraph.
 
@@ -107,9 +108,10 @@ class TextGenerator:
             prompt_template: Template for LLM prompt
             kg: Full KG for additional gene info (optional)
             strategy: Strategy dict with optional description_length, focus_keywords, etc.
+            return_both: If True, return (filtered, original) tuple
 
         Returns:
-            Generated gene description
+            Generated gene description (filtered), or tuple of (filtered, original) if return_both=True
         """
         # Get gene info
         if kg is not None:
@@ -207,9 +209,11 @@ Target length: {min_words}-{max_words} words.
 
         # Apply anti-leakage filter
         from ..utils.filter import filter_description
-        filtered_description = filter_description(description)
+        filter_result = filter_description(description)
 
-        return filtered_description
+        if return_both:
+            return (filter_result.filtered, filter_result.original)
+        return filter_result.filtered
 
     def _format_with_context_window(
         self,

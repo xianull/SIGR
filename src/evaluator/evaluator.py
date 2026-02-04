@@ -19,8 +19,9 @@ from .tasks.genetype_task import GeneTypeTask
 from .tasks.geneattribute_task import GeneAttributeTask
 from .tasks.ggi_task import GGITask
 from .tasks.cell_task import CellTask
-from .classifiers import get_classifier, ClassifierFactory
-from .metrics import compute_clustering_metrics
+from .tasks.perturbation_task import PerturbationTask
+from .classifiers import get_classifier, get_regressor, ClassifierFactory
+from .metrics import compute_clustering_metrics, compute_regression_metrics
 from ..mdp.reward import RewardComputer, RewardResult
 
 # Import configurable reward weights
@@ -52,6 +53,8 @@ class TaskEvaluator:
         'geneattribute_lys4_only': lambda kg: GeneAttributeTask(kg, 'lys4_only'),
         'geneattribute_no_methylation': lambda kg: GeneAttributeTask(kg, 'no_methylation'),
         'geneattribute_bivalent': lambda kg: GeneAttributeTask(kg, 'bivalent'),
+        # Perturbation task requires data_path
+        'perturbation': PerturbationTask,
     }
 
     # Primary metric for each task
@@ -64,6 +67,7 @@ class TaskEvaluator:
         'geneattribute_lys4_only': 'auc',
         'geneattribute_no_methylation': 'auc',
         'geneattribute_bivalent': 'auc',
+        'perturbation': 'delta_correlation',
     }
 
     def __init__(
@@ -71,9 +75,11 @@ class TaskEvaluator:
         task_name: str,
         kg: nx.DiGraph,
         classifier_type: str = 'logistic',
+        regressor_type: str = 'ridge',
         use_cross_validation: bool = False,
         n_folds: int = 5,
-        enable_adaptive_reward: bool = False
+        enable_adaptive_reward: bool = False,
+        data_path: Optional[str] = None,
     ):
         """
         Initialize the evaluator.
@@ -82,15 +88,19 @@ class TaskEvaluator:
             task_name: Name of the task to evaluate
             kg: Knowledge graph
             classifier_type: Type of classifier ('logistic' or 'random_forest')
+            regressor_type: Type of regressor ('ridge', 'knn', 'mlp') for perturbation
             use_cross_validation: Whether to use cross-validation
             n_folds: Number of folds for cross-validation
             enable_adaptive_reward: Enable adaptive reward weight adjustment
+            data_path: Path to task data (required for perturbation task)
         """
         self.task_name = task_name
         self.kg = kg
         self.classifier_type = classifier_type
+        self.regressor_type = regressor_type
         self.use_cross_validation = use_cross_validation
         self.n_folds = n_folds
+        self.data_path = data_path
 
         # Load the task
         if task_name not in self.TASK_CLASSES:
@@ -100,7 +110,13 @@ class TaskEvaluator:
             )
 
         task_factory = self.TASK_CLASSES[task_name]
-        if callable(task_factory) and not isinstance(task_factory, type):
+
+        # Handle perturbation task specially (requires data_path)
+        if task_name == 'perturbation':
+            if data_path is None:
+                raise ValueError("data_path is required for perturbation task")
+            self.task = task_factory(kg, data_path)
+        elif callable(task_factory) and not isinstance(task_factory, type):
             # It's a lambda/function
             self.task = task_factory(kg)
         else:
@@ -108,6 +124,7 @@ class TaskEvaluator:
             self.task = task_factory(kg)
 
         self.primary_metric = self.TASK_METRICS.get(task_name, 'f1')
+        self.is_regression = self.task.get_task_type() == 'regression'
 
         # Initialize reward computer with task-specific weights
         if HAS_REWARD_CONFIG:
@@ -175,18 +192,32 @@ class TaskEvaluator:
         y: np.ndarray,
         random_state: int
     ) -> Dict[str, float]:
-        """Evaluate using stratified k-fold cross-validation."""
-        skf = StratifiedKFold(
-            n_splits=self.n_folds,
-            shuffle=True,
-            random_state=random_state
-        )
+        """Evaluate using k-fold cross-validation."""
+        from sklearn.model_selection import KFold
 
-        all_metrics = {
-            'accuracy': [], 'f1': [], 'auc': [], 'ap': []
-        }
+        # Use regular KFold for regression, StratifiedKFold for classification
+        if self.is_regression:
+            kf = KFold(
+                n_splits=self.n_folds,
+                shuffle=True,
+                random_state=random_state
+            )
+            all_metrics = {
+                'delta_correlation': [], 'mse': [], 'de_correlation': []
+            }
+            split_iterator = kf.split(X)
+        else:
+            skf = StratifiedKFold(
+                n_splits=self.n_folds,
+                shuffle=True,
+                random_state=random_state
+            )
+            all_metrics = {
+                'accuracy': [], 'f1': [], 'auc': [], 'ap': []
+            }
+            split_iterator = skf.split(X, y)
 
-        for fold, (train_idx, test_idx) in enumerate(skf.split(X, y)):
+        for fold, (train_idx, test_idx) in enumerate(split_iterator):
             X_train, X_test = X[train_idx], X[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
 
@@ -215,20 +246,28 @@ class TaskEvaluator:
         random_state: int
     ) -> Dict[str, float]:
         """Evaluate using train/test split."""
-        try:
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y,
-                test_size=test_size,
-                random_state=random_state,
-                stratify=y
-            )
-        except ValueError:
-            # Fall back to non-stratified if stratification fails
+        if self.is_regression:
+            # No stratification for regression
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y,
                 test_size=test_size,
                 random_state=random_state
             )
+        else:
+            try:
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X, y,
+                    test_size=test_size,
+                    random_state=random_state,
+                    stratify=y
+                )
+            except ValueError:
+                # Fall back to non-stratified if stratification fails
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X, y,
+                    test_size=test_size,
+                    random_state=random_state
+                )
 
         return self._train_and_evaluate(X_train, X_test, y_train, y_test, random_state)
 
@@ -240,7 +279,50 @@ class TaskEvaluator:
         y_test: np.ndarray,
         random_state: int
     ) -> Dict[str, float]:
-        """Train classifier and compute metrics."""
+        """Train model and compute metrics."""
+        if self.is_regression:
+            return self._train_and_evaluate_regression(
+                X_train, X_test, y_train, y_test, random_state
+            )
+        else:
+            return self._train_and_evaluate_classification(
+                X_train, X_test, y_train, y_test, random_state
+            )
+
+    def _train_and_evaluate_regression(
+        self,
+        X_train: np.ndarray,
+        X_test: np.ndarray,
+        y_train: np.ndarray,
+        y_test: np.ndarray,
+        random_state: int
+    ) -> Dict[str, float]:
+        """Train regressor and compute regression metrics."""
+        reg = get_regressor(self.regressor_type, random_state=random_state)
+
+        try:
+            reg.fit(X_train, y_train)
+        except Exception as e:
+            logger.warning(f"Error training regressor: {e}")
+            return self._empty_metrics()
+
+        # Predictions
+        y_pred = reg.predict(X_test)
+
+        # Compute regression metrics
+        metrics = compute_regression_metrics(y_test, y_pred)
+
+        return metrics
+
+    def _train_and_evaluate_classification(
+        self,
+        X_train: np.ndarray,
+        X_test: np.ndarray,
+        y_train: np.ndarray,
+        y_test: np.ndarray,
+        random_state: int
+    ) -> Dict[str, float]:
+        """Train classifier and compute classification metrics."""
         # Get classifier
         clf = get_classifier(self.classifier_type, random_state=random_state)
 
@@ -281,6 +363,8 @@ class TaskEvaluator:
 
     def _empty_metrics(self) -> Dict[str, float]:
         """Return empty/default metrics."""
+        if self.is_regression:
+            return {'delta_correlation': 0.0, 'mse': float('inf'), 'de_correlation': 0.0}
         return {'accuracy': 0.0, 'f1': 0.0, 'auc': 0.5}
 
     def evaluate_with_multiple_classifiers(
