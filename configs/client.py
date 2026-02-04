@@ -159,7 +159,7 @@ class DualModelClient:
         api_key: Optional[str] = None,
         # Fast model for generation (high frequency)
         fast_model: str = "gpt-4o-mini",
-        fast_temperature: float = 0.3,
+        fast_temperature: float = 0.7,
         fast_max_tokens: int = 1500,
         # Strong model for reasoning (low frequency)
         strong_model: str = "gemini-3-pro-preview",
@@ -416,9 +416,9 @@ def get_dual_model_client(
 # Recommended model configurations
 MODEL_CONFIGS = {
     'fast': {
-        'gpt-4o-mini': {'temperature': 0.3, 'max_tokens': 1500},
-        'gpt-4o': {'temperature': 0.3, 'max_tokens': 2000},
-        'claude-3-haiku-20240307': {'temperature': 0.3, 'max_tokens': 1500},
+        'gpt-4o-mini': {'temperature': 0.7, 'max_tokens': 1500},
+        'gpt-4o': {'temperature': 0.7, 'max_tokens': 2000},
+        'claude-3-haiku-20240307': {'temperature': 0.7, 'max_tokens': 1500},
     },
     'strong': {
         'gemini-3-pro-preview': {'temperature': 0.5, 'max_tokens': 4000},

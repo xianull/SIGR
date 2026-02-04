@@ -8,7 +8,7 @@ in an MDP-based training loop.
 import logging
 import random
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Protocol
+from typing import Dict, Any, Optional, List, Protocol, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
@@ -22,6 +22,7 @@ from .evaluator import TaskEvaluator
 from .utils import load_kg, get_all_genes
 from .utils.logger import SIGRLogger, setup_logging
 from .mdp import MDPState, TrendAnalyzer, ExplorationScheduler
+from .kgbook import get_kgbook
 
 
 logger = logging.getLogger(__name__)
@@ -156,6 +157,55 @@ class SIGRFramework:
         self.mdp_state = MDPState(task_name=task_name)
         self.trend_analyzer = TrendAnalyzer()
         self.exploration_scheduler = ExplorationScheduler()
+
+        # Initialize KGBOOK for experience replay
+        self.kgbook = get_kgbook()
+        self.plateau_count = 0  # Track consecutive non-improving iterations
+
+        # Load NCBI summaries for baseline iteration
+        self._load_ncbi_summaries()
+
+    def _load_ncbi_summaries(self):
+        """
+        Load NCBI gene summaries into KG nodes for baseline iteration.
+
+        This provides deterministic descriptions for Iteration 1,
+        eliminating LLM randomness in the baseline.
+        """
+        summary_file = Path("data/raw/Homo_sapiens_gene_info_with_go_and_pathways.tsv")
+        if not summary_file.exists():
+            logger.warning(f"NCBI summary file not found: {summary_file}")
+            return
+
+        logger.info("Loading NCBI gene summaries...")
+
+        try:
+            import pandas as pd
+            # Only load necessary columns
+            df = pd.read_csv(
+                summary_file,
+                sep='\t',
+                usecols=['Symbol', 'summary'],
+                low_memory=False
+            )
+
+            updated = 0
+            for _, row in df.iterrows():
+                symbol = row.get('Symbol')
+                if pd.isna(symbol):
+                    continue
+                symbol = str(symbol).strip().upper()
+                summary = row.get('summary', '')
+
+                # Update KG node if gene exists and summary is valid
+                if symbol in self.kg.nodes and summary and str(summary) != '-' and not pd.isna(summary):
+                    self.kg.nodes[symbol]['description'] = str(summary)
+                    updated += 1
+
+            logger.info(f"Loaded NCBI summaries for {updated} genes")
+
+        except Exception as e:
+            logger.warning(f"Error loading NCBI summaries: {e}")
 
     def train(
         self,
@@ -293,12 +343,26 @@ class SIGRFramework:
                 'is_baseline': True
             }
             logger.info("=" * 60)
-            logger.info("Iteration 1: Running NO-KG BASELINE (no graph information)")
-            logger.info("This baseline measures performance without KG context")
+            logger.info("Iteration 1: Running NO-KG BASELINE (using NCBI summaries)")
+            logger.info("This baseline uses deterministic NCBI descriptions (no LLM)")
             logger.info("=" * 60)
-        else:
-            # Get current strategy from Actor
-            strategy = self.actor.get_strategy()
+
+            # Use NCBI summaries directly instead of LLM generation
+            self.logger.log_strategy(strategy)
+            eval_genes = self.eval_genes
+            logger.info(f"Using fixed evaluation set: {len(eval_genes)} genes")
+
+            embeddings, descriptions = self._generate_baseline_embeddings(eval_genes)
+
+            # Continue with evaluation (same as normal iteration)
+            return self._evaluate_and_update(
+                iteration, strategy, embeddings, descriptions,
+                eval_genes, trend_analysis
+            )
+
+        # Normal iteration (iteration > 1): use LLM generation
+        # Get current strategy from Actor
+        strategy = self.actor.get_strategy()
 
         self.logger.log_strategy(strategy)
 
@@ -312,26 +376,105 @@ class SIGRFramework:
         eval_genes = self.eval_genes
         logger.info(f"Using fixed evaluation set: {len(eval_genes)} genes")
 
-        # Generate embeddings for sampled genes
+        # Generate embeddings for sampled genes (uses LLM)
         embeddings, descriptions = self._generate_embeddings(
             eval_genes, strategy
         )
 
+        # Use common evaluation logic
+        return self._evaluate_and_update(
+            iteration, strategy, embeddings, descriptions,
+            eval_genes, trend_analysis
+        )
+
+    def _generate_baseline_embeddings(
+        self,
+        gene_ids: List[str]
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, str]]:
+        """
+        Generate embeddings for baseline iteration using NCBI summaries.
+
+        This method uses pre-loaded NCBI gene summaries instead of LLM generation,
+        providing deterministic results for the baseline iteration.
+
+        Args:
+            gene_ids: List of gene identifiers
+
+        Returns:
+            Tuple of (embeddings dict, descriptions dict)
+        """
+        descriptions = {}
+
+        for gene_id in gene_ids:
+            if gene_id in self.kg.nodes:
+                # Try to get NCBI description
+                desc = self.kg.nodes[gene_id].get('description')
+                if desc and str(desc).strip():
+                    descriptions[gene_id] = str(desc)
+                else:
+                    # Fallback: use gene name
+                    name = self.kg.nodes[gene_id].get('name', gene_id)
+                    descriptions[gene_id] = f"{name} is a human gene."
+            else:
+                descriptions[gene_id] = f"{gene_id} is a human gene."
+
+        logger.info(f"Generated {len(descriptions)} baseline descriptions from NCBI summaries")
+
+        # Count how many have real descriptions vs fallback
+        real_desc_count = sum(
+            1 for gid in gene_ids
+            if gid in self.kg.nodes and self.kg.nodes[gid].get('description')
+        )
+        logger.info(f"  - NCBI summaries: {real_desc_count}/{len(gene_ids)}")
+        logger.info(f"  - Fallback (gene name): {len(gene_ids) - real_desc_count}/{len(gene_ids)}")
+
+        # Encode descriptions
+        logger.info("Encoding baseline descriptions...")
+        embeddings = self.encoder.encode_genes(
+            descriptions,
+            batch_size=64,
+            show_progress=True
+        )
+
+        return embeddings, descriptions
+
+    def _evaluate_and_update(
+        self,
+        iteration: int,
+        strategy: Dict[str, Any],
+        embeddings: Dict[str, np.ndarray],
+        descriptions: Dict[str, str],
+        eval_genes: List[str],
+        trend_analysis: dict = None
+    ) -> Tuple[float, Dict[str, float]]:
+        """
+        Evaluate embeddings and update MDP state.
+
+        This is the common evaluation logic shared between baseline and normal iterations.
+
+        Args:
+            iteration: Current iteration number
+            strategy: Current strategy configuration
+            embeddings: Gene embeddings
+            descriptions: Gene descriptions
+            eval_genes: Genes being evaluated
+            trend_analysis: Optional trend analysis
+
+        Returns:
+            Tuple of (reward, metrics)
+        """
         # Handle empty embeddings (all generation failed)
         if not embeddings:
             logger.error("No embeddings generated - all gene descriptions failed")
-            # Return a penalty reward and empty metrics
             penalty_reward = -0.5
             penalty_metrics = {self.evaluator.primary_metric: 0.0}
 
-            # Update MDP state with failure
             self.mdp_state.update_after_iteration(
                 metric=0.0,
                 strategy=strategy,
                 reward=penalty_reward,
             )
 
-            # Generate failure feedback for Actor
             failure_feedback = (
                 f"Generation failure: No embeddings were generated for {len(eval_genes)} genes. "
                 f"This indicates severe issues with the current strategy. "
@@ -339,7 +482,6 @@ class SIGRFramework:
                 f"3) Reviewing max_neighbors settings."
             )
 
-            # Actor should still reflect on this failure
             self.actor.update_policy(
                 penalty_reward,
                 failure_feedback,
@@ -352,7 +494,7 @@ class SIGRFramework:
 
             return penalty_reward, penalty_metrics
 
-        # Log ALL descriptions (not just samples)
+        # Log descriptions
         for gene_id, desc in descriptions.items():
             self.logger.log_gene_description(gene_id, desc)
 
@@ -367,11 +509,11 @@ class SIGRFramework:
         # Evaluate embeddings
         metrics = self.evaluator.evaluate(embeddings)
 
-        # Compute reward using relative reward (improvement over history)
+        # Compute reward
         history = self.mdp_state.metric_history if self.mdp_state.metric_history else None
         reward = self.evaluator.compute_reward(metrics, history=history)
 
-        # Get detailed reward breakdown for logging
+        # Get detailed reward breakdown
         reward_result = self.evaluator.compute_reward_detailed(metrics, history=history)
         logger.info(
             f"Reward breakdown: total={reward_result.total_reward:.4f}, "
@@ -399,8 +541,7 @@ class SIGRFramework:
         # Record strategy visit for UCB
         self.exploration_scheduler.record_strategy_visit(strategy)
 
-        # Update exploration scheduler with reward (required for UCB1)
-        # Normalize reward to [0, 1] for UCB
+        # Update exploration scheduler with reward
         normalized_reward = min(1.0, max(0.0, reward_result.raw_metric))
         self.exploration_scheduler.update_reward(strategy, normalized_reward)
 
@@ -414,7 +555,7 @@ class SIGRFramework:
         )
         self.logger.log_feedback(feedback)
 
-        # Actor reflects and updates policy (pass raw_metric for accurate best strategy tracking)
+        # Actor reflects and updates policy
         self.actor.update_policy(
             reward,
             feedback,
