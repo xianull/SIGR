@@ -22,10 +22,6 @@ EDGE_TYPE_MAPPING = {
     'regulates': 'TRRUST',
     'expressed in': 'CellMarker',
     'in pathway': 'Reactome',
-    # New edge types
-    'gene to disease association': 'OMIM',
-    'expressed in tissue': 'GTEx',
-    'in complex': 'CORUM',
 }
 
 # Reverse mapping
@@ -205,7 +201,7 @@ def get_kg_summary(kg: nx.DiGraph, gene_id: str) -> str:
         "KG Neighbors:"
     ]
 
-    for edge_type in ['PPI', 'GO', 'HPO', 'TRRUST', 'CellMarker']:
+    for edge_type in ['PPI', 'GO', 'HPO', 'TRRUST', 'CellMarker', 'Reactome']:
         count = edge_counts.get(edge_type, 0)
         if count > 0:
             summary_parts.append(f"  - {edge_type}: {count}")
