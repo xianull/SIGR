@@ -98,6 +98,32 @@ TASK_IMPLICIT_SIGNALS: Dict[str, List[str]] = {
 }
 
 
+# Task-specific optimization hints based on empirical results
+# These hints guide the LLM to use proven high-performance configurations
+TASK_OPTIMIZATION_HINTS: Dict[str, str] = {
+    'geneattribute_dosage_sensitivity': """
+CRITICAL OPTIMIZATION HINTS for dosage sensitivity (from empirical results):
+- max_neighbors=100 has achieved AUC 0.94+ - DO NOT reduce below 80
+- description_length='long' captures more constraint signals - PREFER 'long'
+- HPO edges are MOST informative - prioritize HPO with weight 1.0
+- weighted sampling outperforms top_k for this task
+- Key focus_keywords: haploinsufficiency, pLI, LOEUF, constraint, hub gene
+- Target AUC: 0.95+ (baseline GenePT: 0.93)
+""",
+    'geneattribute_lys4_only': """
+OPTIMIZATION HINTS for lys4_only task:
+- Focus on GO and Reactome edges for chromatin/methylation information
+- description_length='medium' is usually sufficient
+- Key focus_keywords: H3K4me3, active promoter, housekeeping
+""",
+    'geneattribute_bivalent': """
+OPTIMIZATION HINTS for bivalent task:
+- Prioritize GO edges for developmental and epigenetic information
+- Key focus_keywords: H3K4me3, H3K27me3, poised promoter, PRC2, pluripotency
+""",
+}
+
+
 # Task-specific initial prompts - OPTIMIZED for conciseness and task-relevance
 # Key changes: 100-150 word limit, focused on task-specific implicit signals
 TASK_INITIAL_PROMPTS: Dict[str, str] = {
@@ -631,6 +657,8 @@ Output format:
 REFLECTION_COT_PROMPT_TEMPLATE = """You are optimizing a gene representation strategy for the {task_name} task.
 Use chain-of-thought reasoning to analyze the situation step by step.
 
+{optimization_hints}
+
 ## STEP 1: DIAGNOSE THE PROBLEM
 Current Reward: {reward:.4f}
 
@@ -835,8 +863,14 @@ Reason: {trend_analysis.get('action_reason', 'N/A')}
     neighbors_per_type = strategy_dict.get('neighbors_per_type', {})
     focus_keywords = strategy_dict.get('focus_keywords', [])
 
+    # Get task-specific optimization hints
+    optimization_hints = TASK_OPTIMIZATION_HINTS.get(task_name, "")
+    if optimization_hints:
+        optimization_hints = f"## IMPORTANT - TASK-SPECIFIC OPTIMIZATION HINTS\n{optimization_hints}"
+
     return REFLECTION_COT_PROMPT_TEMPLATE.format(
         task_name=task_name,
+        optimization_hints=optimization_hints,
         edge_types=strategy_dict.get('edge_types', []),
         max_hops=strategy_dict.get('max_hops', 2),
         sampling=strategy_dict.get('sampling', 'top_k'),

@@ -70,7 +70,7 @@ class TrendAnalyzer:
         min_history: int = 3,
         plateau_threshold: float = 0.005,
         improvement_threshold: float = 0.01,
-        convergence_window: int = 5,
+        convergence_window: int = 3,
         oscillation_threshold: float = 0.02,
     ):
         """
