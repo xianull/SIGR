@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 SamplingMethod = Literal['top_k', 'random', 'weighted']
 DescriptionLength = Literal['short', 'medium', 'long']
+DescriptionFocus = Literal['balanced', 'network', 'function', 'phenotype']
+ContextWindow = Literal['minimal', 'local', 'extended', 'full']
+PromptStyle = Literal['analytical', 'narrative', 'structured', 'comparative']
+FeatureSelection = Literal['all', 'essential', 'diverse', 'task_specific']
 
 
 @dataclass
@@ -30,12 +34,19 @@ class StrategyConfig:
         sampling: Sampling method for neighbors (top_k, random, weighted)
         max_neighbors: Global maximum neighbors per edge type
 
-        # New extended parameters
+        # Extended parameters
         description_length: Target description length (short=50-100, medium=100-150, long=150-250 words)
         edge_weights: Per-edge-type importance weights for formatting priority
         neighbors_per_type: Fine-grained neighbor limits per edge type
         include_statistics: Whether to include statistical summaries in description
         focus_keywords: Keywords to emphasize in the description
+
+        # New strategy dimensions (v2)
+        description_focus: Focus mode for description generation
+        context_window: How much KG context to include
+        prompt_style: Style/format of the generated description
+        feature_selection: How to select features for description
+        generation_passes: Number of refinement passes (1-3)
 
         prompt_template: LLM prompt template
         reasoning: LLM's reasoning for this strategy
@@ -46,12 +57,19 @@ class StrategyConfig:
     sampling: SamplingMethod = 'top_k'
     max_neighbors: int = 50
 
-    # Extended parameters (new)
+    # Extended parameters (existing)
     description_length: DescriptionLength = 'medium'  # short=50-100, medium=100-150, long=150-250 words
     edge_weights: Dict[str, float] = field(default_factory=dict)  # e.g., {'PPI': 1.0, 'GO': 0.8}
     neighbors_per_type: Dict[str, int] = field(default_factory=dict)  # e.g., {'PPI': 30, 'GO': 20}
     include_statistics: bool = True  # Include counts, scores, etc.
     focus_keywords: List[str] = field(default_factory=list)  # e.g., ['hub', 'conserved']
+
+    # New strategy dimensions (v2)
+    description_focus: DescriptionFocus = 'balanced'  # balanced, network, function, phenotype
+    context_window: ContextWindow = 'full'  # minimal, local, extended, full
+    prompt_style: PromptStyle = 'analytical'  # analytical, narrative, structured, comparative
+    feature_selection: FeatureSelection = 'all'  # all, essential, diverse, task_specific
+    generation_passes: int = 1  # 1-3 passes for refinement
 
     # Text generation parameters
     prompt_template: str = ""
@@ -71,6 +89,8 @@ class StrategyConfig:
             'edge_types', 'max_hops', 'sampling', 'max_neighbors',
             'description_length', 'edge_weights', 'neighbors_per_type',
             'include_statistics', 'focus_keywords',
+            'description_focus', 'context_window', 'prompt_style',
+            'feature_selection', 'generation_passes',
             'prompt_template', 'reasoning'
         }
         filtered_data = {k: v for k, v in data.items() if k in valid_fields}

@@ -665,6 +665,11 @@ Current Strategy:
 - Neighbors per type: {neighbors_per_type}
 - Include statistics: {include_statistics}
 - Focus keywords: {focus_keywords}
+- Description focus: {description_focus}
+- Context window: {context_window}
+- Prompt style: {prompt_style}
+- Feature selection: {feature_selection}
+- Generation passes: {generation_passes}
 
 Based on Steps 1-3, propose improvements:
 - What specific parameter(s) to change?
@@ -682,6 +687,11 @@ Available parameters:
 - Neighbors per type: 10-200 per edge type
 - Include statistics: true/false
 - Focus keywords: list of terms to emphasize
+- Description focus: balanced (default), network (emphasize hub/centrality), function (emphasize pathways), phenotype (emphasize disease/phenotype)
+- Context window: minimal (direct neighbors only), local (1-hop), extended (2-hop), full (all available)
+- Prompt style: analytical (factual analysis), narrative (story-like), structured (bullet points), comparative (compare with similar genes)
+- Feature selection: all (include everything), essential (core features only), diverse (maximize variety), task_specific (focus on task-relevant features)
+- Generation passes: 1-3 (number of refinement iterations)
 
 ```json
 {{
@@ -694,6 +704,11 @@ Available parameters:
     "neighbors_per_type": {{"PPI": 30, ...}},
     "include_statistics": true | false,
     "focus_keywords": [...],
+    "description_focus": "balanced" | "network" | "function" | "phenotype",
+    "context_window": "minimal" | "local" | "extended" | "full",
+    "prompt_style": "analytical" | "narrative" | "structured" | "comparative",
+    "feature_selection": "all" | "essential" | "diverse" | "task_specific",
+    "generation_passes": 1 | 2 | 3,
     "reasoning": "Summary of your Step 1-4 analysis"
 }}
 ```
@@ -831,6 +846,11 @@ Reason: {trend_analysis.get('action_reason', 'N/A')}
         neighbors_per_type=neighbors_per_type if neighbors_per_type else 'Not set',
         include_statistics=strategy_dict.get('include_statistics', True),
         focus_keywords=focus_keywords if focus_keywords else 'Not set',
+        description_focus=strategy_dict.get('description_focus', 'balanced'),
+        context_window=strategy_dict.get('context_window', 'full'),
+        prompt_style=strategy_dict.get('prompt_style', 'analytical'),
+        feature_selection=strategy_dict.get('feature_selection', 'all'),
+        generation_passes=strategy_dict.get('generation_passes', 1),
         reward=reward,
         feedback=feedback,
         history=history_str,
