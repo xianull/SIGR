@@ -14,7 +14,7 @@ Architecture:
 """
 
 import logging
-from typing import Dict, List, Optional, Any, Protocol
+from typing import Dict, List, Optional, Any, Protocol, Union
 from dataclasses import dataclass
 
 from .strategy import Strategy, StrategyConfig, get_default_strategy
@@ -204,8 +204,9 @@ class ActorAgent:
         self,
         reward: float,
         feedback: str,
-        raw_metric: float = None,
-        trend_analysis: dict = None
+        raw_metric: Optional[float] = None,
+        trend_analysis: Optional[Dict[str, Any]] = None,
+        kgbook_suggestions: Optional[str] = None
     ):
         """
         Update policy based on reward and feedback using LLM reflection.
@@ -223,6 +224,7 @@ class ActorAgent:
             feedback: Natural language feedback from evaluator
             raw_metric: Original metric value (for best strategy tracking)
             trend_analysis: Optional trend analysis dict for trend-aware reflection
+            kgbook_suggestions: Optional KGBOOK suggestions when plateaued
         """
         logger.info(f"Updating policy with reward: {reward:.4f}")
 
@@ -330,6 +332,11 @@ class ActorAgent:
 
         # Combine all context for LLM
         enhanced_feedback = feedback + advantage_context + tracker_guidance
+
+        # Add KGBOOK suggestions if available (when plateaued)
+        if kgbook_suggestions:
+            enhanced_feedback += f"\n\n{kgbook_suggestions}"
+            logger.info("KGBOOK suggestions added to reflection context")
 
         if self.enable_cot_reasoning:
             reflection_prompt = get_reflection_cot_prompt(

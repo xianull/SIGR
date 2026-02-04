@@ -12,7 +12,11 @@ Dual-model architecture:
 import os
 import logging
 from typing import Optional
-import httpx
+
+try:
+    import httpx
+except ImportError:
+    httpx = None
 
 try:
     from openai import OpenAI
@@ -57,6 +61,11 @@ class LLMClient:
                 "openai package is required. Install with: pip install openai>=1.0.0"
             )
 
+        if httpx is None:
+            raise ImportError(
+                "httpx package is required. Install with: pip install httpx>=0.24.0"
+            )
+
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             raise ValueError(
@@ -64,7 +73,7 @@ class LLMClient:
             )
 
         # Create HTTP client with connection pooling
-        http_client = httpx.Client(
+        self._http_client = httpx.Client(
             limits=httpx.Limits(
                 max_connections=max_connections,
                 max_keepalive_connections=max_connections
@@ -75,14 +84,33 @@ class LLMClient:
         self.client = OpenAI(
             base_url=base_url,
             api_key=self.api_key,
-            http_client=http_client
+            http_client=self._http_client
         )
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.call_count = 0
 
-        logger.info(f"LLMClient initialized: model={model}, base_url={base_url}, max_connections={max_connections}")
+    def close(self):
+        """关闭 HTTP 客户端，释放连接资源"""
+        if hasattr(self, '_http_client') and self._http_client:
+            try:
+                self._http_client.close()
+            except Exception as e:
+                logger.debug(f"Error closing HTTP client: {e}")
+
+    def __del__(self):
+        """析构时关闭连接"""
+        self.close()
+
+    def __enter__(self):
+        """支持上下文管理器"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """退出上下文时关闭连接"""
+        self.close()
+        return False
 
     def generate(self, prompt: str) -> str:
         """
@@ -189,6 +217,11 @@ class DualModelClient:
                 "openai package is required. Install with: pip install openai>=1.0.0"
             )
 
+        if httpx is None:
+            raise ImportError(
+                "httpx package is required. Install with: pip install httpx>=0.24.0"
+            )
+
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             raise ValueError(
@@ -196,7 +229,7 @@ class DualModelClient:
             )
 
         # Create HTTP client with connection pooling
-        http_client = httpx.Client(
+        self._http_client = httpx.Client(
             limits=httpx.Limits(
                 max_connections=max_connections,
                 max_keepalive_connections=max_connections
@@ -207,7 +240,7 @@ class DualModelClient:
         self.client = OpenAI(
             base_url=base_url,
             api_key=self.api_key,
-            http_client=http_client
+            http_client=self._http_client
         )
 
         # Model configurations
@@ -227,6 +260,27 @@ class DualModelClient:
             f"DualModelClient initialized: "
             f"fast={fast_model}, strong={strong_model}"
         )
+
+    def close(self):
+        """关闭 HTTP 客户端，释放连接资源"""
+        if hasattr(self, '_http_client') and self._http_client:
+            try:
+                self._http_client.close()
+            except Exception as e:
+                logger.debug(f"Error closing HTTP client: {e}")
+
+    def __del__(self):
+        """析构时关闭连接"""
+        self.close()
+
+    def __enter__(self):
+        """支持上下文管理器"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """退出上下文时关闭连接"""
+        self.close()
+        return False
 
     def generate(self, prompt: str) -> str:
         """

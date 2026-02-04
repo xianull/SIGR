@@ -22,7 +22,7 @@ from .evaluator import TaskEvaluator
 from .utils import load_kg, get_all_genes
 from .utils.logger import SIGRLogger, setup_logging
 from .mdp import MDPState, TrendAnalyzer, ExplorationScheduler
-from .kgbook import get_kgbook
+from .kgbook import get_memory, Memory
 
 
 logger = logging.getLogger(__name__)
@@ -158,8 +158,8 @@ class SIGRFramework:
         self.trend_analyzer = TrendAnalyzer()
         self.exploration_scheduler = ExplorationScheduler()
 
-        # Initialize KGBOOK for experience replay
-        self.kgbook = get_kgbook()
+        # Initialize Memory for experience replay and dynamic edge weights
+        self.memory = get_memory()
         self.plateau_count = 0  # Track consecutive non-improving iterations
 
         # Load NCBI summaries for baseline iteration
@@ -171,8 +171,27 @@ class SIGRFramework:
 
         This provides deterministic descriptions for Iteration 1,
         eliminating LLM randomness in the baseline.
+
+        Note: If the KG already contains ncbi_summary attributes (from build_kg.py),
+        this step is skipped to avoid redundant processing.
         """
-        summary_file = Path("data/raw/Homo_sapiens_gene_info_with_go_and_pathways.tsv")
+        # Check if KG already has NCBI summaries (from kg_builder)
+        sample_gene = next(iter(self.kg.nodes()), None)
+        if sample_gene and 'ncbi_summary' in self.kg.nodes[sample_gene]:
+            logger.info("NCBI summaries already in KG (from build), skipping runtime load")
+            # Copy ncbi_summary to description for compatibility
+            updated = 0
+            for gene in self.kg.nodes():
+                ncbi_summary = self.kg.nodes[gene].get('ncbi_summary')
+                if ncbi_summary:
+                    self.kg.nodes[gene]['description'] = ncbi_summary
+                    updated += 1
+            logger.info(f"Copied {updated} NCBI summaries to description field")
+            return
+
+        # Use absolute path based on project root
+        project_root = Path(__file__).parent.parent
+        summary_file = project_root / "data/raw/Homo_sapiens_gene_info_with_go_and_pathways.tsv"
         if not summary_file.exists():
             logger.warning(f"NCBI summary file not found: {summary_file}")
             return
@@ -181,26 +200,33 @@ class SIGRFramework:
 
         try:
             import pandas as pd
-            # Only load necessary columns
+            # Only load necessary columns with proper NA handling
             df = pd.read_csv(
                 summary_file,
                 sep='\t',
                 usecols=['Symbol', 'summary'],
-                low_memory=False
+                low_memory=False,
+                na_values=['-', '']  # Treat '-' and empty as NA
             )
 
-            updated = 0
-            for _, row in df.iterrows():
-                symbol = row.get('Symbol')
-                if pd.isna(symbol):
-                    continue
-                symbol = str(symbol).strip().upper()
-                summary = row.get('summary', '')
+            # Vectorized processing instead of iterrows()
+            df = df.dropna(subset=['Symbol'])
+            df['Symbol'] = df['Symbol'].astype(str).str.strip().str.upper()
+            df = df.dropna(subset=['summary'])
 
-                # Update KG node if gene exists and summary is valid
-                if symbol in self.kg.nodes and summary and str(summary) != '-' and not pd.isna(summary):
-                    self.kg.nodes[symbol]['description'] = str(summary)
-                    updated += 1
+            # Build a dict for fast lookup
+            kg_genes = set(self.kg.nodes())
+            summary_dict = {
+                symbol: summary
+                for symbol, summary in zip(df['Symbol'], df['summary'])
+                if symbol in kg_genes
+            }
+
+            # Update KG nodes
+            updated = 0
+            for symbol, summary in summary_dict.items():
+                self.kg.nodes[symbol]['description'] = str(summary)
+                updated += 1
 
             logger.info(f"Loaded NCBI summaries for {updated} genes")
 
@@ -545,6 +571,44 @@ class SIGRFramework:
         normalized_reward = min(1.0, max(0.0, reward_result.raw_metric))
         self.exploration_scheduler.update_reward(strategy, normalized_reward)
 
+        # Memory: Track improvement, plateau, and edge effects
+        current_metric = reward_result.raw_metric
+        previous_best = self.actor.best_reward if self.actor.best_reward is not None else 0
+        previous_metric = self.mdp_state.metric_history[-2] if len(self.mdp_state.metric_history) >= 2 else 0
+
+        # Record edge effects for all iterations > 1
+        edge_types = strategy.get('edge_types', [])
+        if iteration > 1 and edge_types:
+            self.memory.record_edge_effects(
+                task_name=self.task_name,
+                edge_types=edge_types,
+                metric_before=previous_metric,
+                metric_after=current_metric
+            )
+
+        # 只在 iteration > 1 时统计 plateau（baseline 不算）
+        if iteration == 1:
+            # Iteration 1 是 baseline，不参与 plateau 计数
+            logger.info("Memory: Baseline iteration (iter 1), skipping plateau tracking")
+        elif current_metric > previous_best:
+            # 有改进，记录到 Memory
+            improvement = current_metric - previous_best
+            context = f"Edge types {edge_types} improved from {previous_best:.4f} to {current_metric:.4f}"
+            self.memory.record_improvement(
+                task_name=self.task_name,
+                strategy=strategy,
+                from_metric=previous_best,
+                to_metric=current_metric,
+                iteration=iteration,
+                context=context
+            )
+            self.plateau_count = 0  # Reset plateau counter
+            logger.info(f"Memory: Recorded improvement +{improvement:.4f}")
+        else:
+            # 无改进，增加 plateau 计数
+            self.plateau_count += 1
+            logger.info(f"Memory: No improvement (plateau count: {self.plateau_count})")
+
         # Log evaluation results
         self.logger.log_evaluation(metrics, reward)
 
@@ -553,6 +617,20 @@ class SIGRFramework:
             metrics, embeddings, descriptions,
             best_metric=self.actor.best_reward
         )
+
+        # Add Memory suggestions if plateaued for 2+ iterations
+        memory_suggestions = None
+        if self.plateau_count >= 2:
+            suggestions = self.memory.get_suggestions(
+                task_name=self.task_name,
+                current_strategy=strategy,
+                top_k=3
+            )
+            if suggestions:
+                memory_suggestions = self.memory.format_suggestions_for_prompt(suggestions)
+                feedback += f"\n\n{memory_suggestions}"
+                logger.info(f"Memory: Added {len(suggestions)} suggestions due to plateau")
+
         self.logger.log_feedback(feedback)
 
         # Actor reflects and updates policy
@@ -560,7 +638,8 @@ class SIGRFramework:
             reward,
             feedback,
             raw_metric=reward_result.raw_metric,
-            trend_analysis=trend_analysis
+            trend_analysis=trend_analysis,
+            kgbook_suggestions=memory_suggestions
         )
         self.logger.log_reflection(self.actor.get_last_reflection())
 
@@ -671,6 +750,9 @@ CONSTRAINTS:
         # Validate and build extraction strategy
         extraction_strategy = self._validate_and_build_strategy(strategy)
 
+        # Get dynamic edge weights from Memory
+        edge_weights = self.memory.get_edge_weights(self.task_name)
+
         # Log strategy mode
         if not extraction_strategy['edge_types']:
             logger.info("Extraction mode: BASELINE (no graph information)")
@@ -683,11 +765,12 @@ CONSTRAINTS:
         def generate_single_description(gene_id: str) -> tuple:
             """Generate description for a single gene."""
             try:
-                # Extract subgraph using strategy
+                # Extract subgraph using strategy with dynamic edge weights
                 subgraph = extract_subgraph(
                     gene_id=gene_id,
                     strategy=extraction_strategy,
-                    kg=self.kg
+                    kg=self.kg,
+                    edge_weights=edge_weights
                 )
 
                 # Generate description with strategy parameters
@@ -986,10 +1069,13 @@ class MockLLMClient:
 
     def __init__(self):
         self.call_count = 0
+        self.fast_call_count = 0
+        self.strong_call_count = 0
 
     def generate(self, prompt: str) -> str:
-        """Generate mock response."""
+        """Generate mock response (fast model)."""
         self.call_count += 1
+        self.fast_call_count += 1
 
         if 'updated strategy' in prompt.lower() or 'json' in prompt.lower():
             import json
@@ -1002,6 +1088,16 @@ class MockLLMClient:
             })
         else:
             return f"Mock description for gene. Call #{self.call_count}"
+
+    def generate_strong(self, prompt: str) -> str:
+        """Generate mock response (strong model)."""
+        self.call_count += 1
+        self.strong_call_count += 1
+        return self.generate(prompt)
+
+    def generate_fast(self, prompt: str) -> str:
+        """Alias for generate()."""
+        return self.generate(prompt)
 
 
 def list_available_tasks() -> List[str]:

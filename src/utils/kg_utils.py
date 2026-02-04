@@ -101,7 +101,8 @@ def get_neighbors(
     gene_id: str,
     edge_type: str,
     max_count: int = 50,
-    method: str = 'top_k'
+    method: str = 'top_k',
+    edge_type_weight: float = 1.0
 ) -> List[Tuple[str, Dict[str, Any]]]:
     """
     Get neighbors of a gene by edge type.
@@ -112,6 +113,8 @@ def get_neighbors(
         edge_type: Type of edge ('PPI', 'GO', 'HPO', 'TRRUST', 'CellMarker', 'Reactome')
         max_count: Maximum number of neighbors to return
         method: Sampling method ('top_k', 'random', 'weighted')
+        edge_type_weight: Dynamic weight for this edge type (0.1-1.0).
+                         Higher weight means more neighbors will be returned.
 
     Returns:
         List of (neighbor_id, edge_data) tuples
@@ -137,31 +140,49 @@ def get_neighbors(
             if label == edge_label:
                 neighbors.append((source, data))
 
-    # Apply sampling method
+    # Apply sampling method with edge_type_weight
+    # Higher weight = more neighbors returned
+    effective_max = max(5, int(max_count * edge_type_weight))
+
     if method == 'top_k':
         # Sort by score if available (for PPI)
         if edge_type == 'PPI':
             neighbors.sort(key=lambda x: x[1].get('combined_score', 0), reverse=True)
-        neighbors = neighbors[:max_count]
+        neighbors = neighbors[:effective_max]
 
     elif method == 'random':
         import random
         random.shuffle(neighbors)
-        neighbors = neighbors[:max_count]
+        neighbors = neighbors[:effective_max]
 
     elif method == 'weighted':
-        # Weight by score for PPI, otherwise treat equally
+        # Weight by score for PPI, otherwise use edge_type_weight as base
         import random
-        if edge_type == 'PPI' and neighbors:
-            weights = [n[1].get('combined_score', 0.5) for n in neighbors]
+        if neighbors:
+            if edge_type == 'PPI':
+                # For PPI: combine combined_score with edge_type_weight
+                weights = [
+                    n[1].get('combined_score', 0.5) * edge_type_weight
+                    for n in neighbors
+                ]
+            else:
+                # For non-PPI: use edge_type_weight as uniform weight
+                weights = [edge_type_weight] * len(neighbors)
+
             total = sum(weights)
             if total > 0:
                 weights = [w / total for w in weights]
-                indices = random.choices(range(len(neighbors)), weights=weights, k=min(max_count, len(neighbors)))
+                indices = random.choices(
+                    range(len(neighbors)),
+                    weights=weights,
+                    k=min(effective_max, len(neighbors))
+                )
                 neighbors = [neighbors[i] for i in indices]
+            else:
+                random.shuffle(neighbors)
+                neighbors = neighbors[:effective_max]
         else:
-            random.shuffle(neighbors)
-            neighbors = neighbors[:max_count]
+            neighbors = []
 
     return neighbors
 

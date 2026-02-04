@@ -29,6 +29,7 @@ from .encoder import GeneEncoder
 from .evaluator import TaskEvaluator
 from .utils import load_kg, get_all_genes, get_gene_info
 from .utils.logger import SIGRLogger, setup_logging
+from .kgbook import KGBook, get_kgbook
 
 __all__ = [
     # Main framework
@@ -57,4 +58,7 @@ __all__ = [
     "get_gene_info",
     "SIGRLogger",
     "setup_logging",
+    # KGBook
+    "KGBook",
+    "get_kgbook",
 ]

@@ -1,82 +1,388 @@
 """
-KGBOOK - Knowledge Graph Strategy Book
+Memory - Knowledge Graph Memory System
 
-Stores successful strategies across tasks for experience replay.
-When optimization plateaus, Actor can reference KGBOOK for inspiration.
+Evolved from KGBOOK to support:
+1. Successful strategy storage (original KGBook functionality)
+2. Edge type effect tracking with EMA
+3. Dynamic edge weight calculation
+
+When optimization plateaus, Actor can reference Memory for inspiration.
+Edge weights are dynamically adjusted based on historical effectiveness.
 """
 
 import json
 import logging
+import os
+import shutil
+import tempfile
+import threading
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+# All supported edge types
+ALL_EDGE_TYPES = ['PPI', 'GO', 'HPO', 'TRRUST', 'CellMarker', 'Reactome']
 
-class KGBook:
+
+@dataclass
+class EdgeEffect:
+    """Tracks the effect of an edge type on task performance."""
+    usage_count: int = 0
+    success_count: int = 0  # Number of times using this edge led to improvement
+    total_improvement: float = 0.0
+    ema_effect: float = 0.0  # Exponential moving average of improvement
+    best_metric_with: float = 0.0  # Best metric achieved when using this edge type
+    last_updated: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'EdgeEffect':
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+class Memory:
     """
-    Knowledge Graph Strategy Book.
+    Knowledge Graph Memory System (evolved from KGBook).
 
     Stores and retrieves successful strategies across different tasks.
-    Enables cross-task learning and plateau recovery.
+    Tracks edge type effectiveness and computes dynamic edge weights.
 
     Structure:
     {
-        "task_name": {
-            "successful_strategies": [
-                {
-                    "strategy": {...},
-                    "improvement": 0.05,
-                    "from_metric": 0.85,
-                    "to_metric": 0.90,
-                    "iteration": 3,
-                    "timestamp": "...",
-                    "context": "description of what improved"
-                }
-            ],
-            "best_strategy": {...},
-            "best_metric": 0.93
+        "version": "2.0",
+        "global_edge_effects": {
+            "PPI": {"usage_count": 10, "success_count": 7, "ema_effect": 0.023, ...},
+            ...
+        },
+        "task_edge_effects": {
+            "task_name": {
+                "PPI": {"usage_count": 5, "success_count": 4, "ema_effect": 0.018, ...},
+                ...
+            }
+        },
+        "tasks": {
+            "task_name": {
+                "successful_strategies": [...],
+                "best_strategy": {...},
+                "best_metric": 0.93
+            }
         }
     }
     """
 
-    def __init__(self, book_path: str = "data/kgbook.json"):
+    # EMA decay factor (higher = more weight to history)
+    EMA_DECAY = 0.9
+
+    # Minimum samples before using learned weights
+    MIN_SAMPLES = 3
+
+    # Learning rate for mixing prior and learned weights
+    LEARNING_RATE = 0.3
+
+    # Base prior weights for edge types
+    BASE_PRIOR_WEIGHTS = {
+        'PPI': 0.7,
+        'GO': 0.6,
+        'HPO': 0.7,
+        'TRRUST': 0.5,
+        'CellMarker': 0.4,
+        'Reactome': 0.5
+    }
+
+    # Task-specific prior weights
+    TASK_PRIOR_WEIGHTS = {
+        'geneattribute_dosage_sensitivity': {
+            'HPO': 0.9, 'GO': 0.7, 'PPI': 0.6, 'TRRUST': 0.5, 'Reactome': 0.5, 'CellMarker': 0.4
+        },
+        'ppi': {
+            'PPI': 0.9, 'GO': 0.5, 'HPO': 0.3, 'TRRUST': 0.4, 'Reactome': 0.4, 'CellMarker': 0.3
+        },
+        'genetype': {
+            'GO': 0.8, 'HPO': 0.6, 'PPI': 0.5, 'TRRUST': 0.5, 'Reactome': 0.5, 'CellMarker': 0.4
+        },
+    }
+
+    def __init__(self, memory_path: str = "data/memory.json"):
         """
-        Initialize KGBOOK.
+        Initialize Memory.
 
         Args:
-            book_path: Path to the KGBOOK JSON file
+            memory_path: Path to the Memory JSON file
         """
-        self.book_path = Path(book_path)
-        self.book: Dict[str, Any] = {}
+        self.memory_path = Path(memory_path)
+        self.data: Dict[str, Any] = self._get_empty_structure()
+        self._file_lock = threading.Lock()
         self._load()
 
+    def _get_empty_structure(self) -> Dict[str, Any]:
+        """Return empty Memory structure."""
+        return {
+            "version": "2.0",
+            "global_edge_effects": {},
+            "task_edge_effects": {},
+            "tasks": {}
+        }
+
     def _load(self):
-        """Load KGBOOK from disk."""
-        if self.book_path.exists():
-            try:
-                with open(self.book_path, 'r') as f:
-                    self.book = json.load(f)
-                logger.info(f"Loaded KGBOOK with {len(self.book)} tasks")
-            except Exception as e:
-                logger.warning(f"Error loading KGBOOK: {e}, starting fresh")
-                self.book = {}
-        else:
-            logger.info("KGBOOK not found, creating new one")
-            self.book = {}
+        """Load Memory from disk, with migration from old KGBook format.
+
+        Note: Uses _file_lock to prevent race conditions during initialization.
+        """
+        with self._file_lock:
+            if self.memory_path.exists():
+                try:
+                    with open(self.memory_path, 'r') as f:
+                        loaded = json.load(f)
+
+                    # Check if this is old KGBook format (no version field)
+                    if "version" not in loaded:
+                        logger.info("Migrating from old KGBook format to Memory v2.0")
+                        self.data = self._migrate_from_kgbook(loaded)
+                        self._save_unlocked()
+                    else:
+                        self.data = loaded
+
+                    task_count = len(self.data.get("tasks", {}))
+                    logger.info(f"Loaded Memory v{self.data.get('version', '1.0')} with {task_count} tasks")
+                except Exception as e:
+                    logger.warning(f"Error loading Memory: {e}, starting fresh")
+                    self.data = self._get_empty_structure()
+            else:
+                # Try to load from old kgbook.json location
+                old_path = Path("data/kgbook.json")
+                if old_path.exists():
+                    try:
+                        with open(old_path, 'r') as f:
+                            old_data = json.load(f)
+                        logger.info("Migrating from kgbook.json to memory.json")
+                        self.data = self._migrate_from_kgbook(old_data)
+                        self._save_unlocked()
+                    except Exception as e:
+                        logger.warning(f"Error migrating from kgbook.json: {e}")
+                        self.data = self._get_empty_structure()
+                else:
+                    logger.info("Memory not found, creating new one")
+                    self.data = self._get_empty_structure()
+
+    def _migrate_from_kgbook(self, old_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Migrate old KGBook format to new Memory format."""
+        new_data = self._get_empty_structure()
+        new_data["tasks"] = old_data  # Old format is just the tasks dict
+        return new_data
+
+    def _save_unlocked(self):
+        """Save without acquiring lock (caller must hold _file_lock)."""
+        self.memory_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=self.memory_path.parent,
+            suffix='.tmp'
+        )
+        try:
+            with os.fdopen(fd, 'w') as f:
+                json.dump(self.data, f, indent=2, default=str)
+            shutil.move(tmp_path, self.memory_path)
+            logger.debug(f"Memory saved to {self.memory_path}")
+        except Exception as e:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            logger.error(f"Error saving Memory: {e}")
+            raise
 
     def _save(self):
-        """Save KGBOOK to disk."""
-        self.book_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.book_path, 'w') as f:
-            json.dump(self.book, f, indent=2, default=str)
-        logger.debug(f"KGBOOK saved to {self.book_path}")
+        """原子性保存 Memory（write-then-rename）"""
+        with self._file_lock:
+            self._save_unlocked()
+
+    # ========== Edge Effect Tracking (NEW) ==========
+
+    def record_edge_effects(
+        self,
+        task_name: str,
+        edge_types: List[str],
+        metric_before: float,
+        metric_after: float
+    ):
+        """
+        Record the effect of edge types used in an iteration.
+
+        Args:
+            task_name: Name of the task
+            edge_types: List of edge types used
+            metric_before: Metric before this iteration
+            metric_after: Metric after this iteration
+        """
+        improvement = metric_after - metric_before
+        is_improvement = improvement > 0
+
+        # Update global effects
+        if "global_edge_effects" not in self.data:
+            self.data["global_edge_effects"] = {}
+
+        for edge_type in edge_types:
+            self._update_edge_effect(
+                self.data["global_edge_effects"],
+                edge_type,
+                improvement,
+                metric_after,
+                is_improvement
+            )
+
+        # Update task-specific effects
+        if "task_edge_effects" not in self.data:
+            self.data["task_edge_effects"] = {}
+        if task_name not in self.data["task_edge_effects"]:
+            self.data["task_edge_effects"][task_name] = {}
+
+        for edge_type in edge_types:
+            self._update_edge_effect(
+                self.data["task_edge_effects"][task_name],
+                edge_type,
+                improvement,
+                metric_after,
+                is_improvement
+            )
+
+        self._save()
+
+        # Log edge effects
+        effect_strs = []
+        for et in edge_types:
+            effect = self.data["task_edge_effects"][task_name].get(et, {})
+            usage = effect.get("usage_count", 0)
+            success = effect.get("success_count", 0)
+            ema = effect.get("ema_effect", 0)
+            effect_strs.append(f"{et}(n={usage}, s={success}, ema={ema:+.4f})")
+        logger.info(f"Memory: Recorded edge effects for {task_name}: {', '.join(effect_strs)}")
+
+    def _update_edge_effect(
+        self,
+        effects: Dict[str, Dict],
+        edge_type: str,
+        improvement: float,
+        metric: float,
+        is_improvement: bool
+    ):
+        """Update effect statistics for a single edge type."""
+        if edge_type not in effects:
+            effects[edge_type] = EdgeEffect().to_dict()
+
+        effect = effects[edge_type]
+        effect["usage_count"] = effect.get("usage_count", 0) + 1
+        if is_improvement:
+            effect["success_count"] = effect.get("success_count", 0) + 1
+        effect["total_improvement"] = effect.get("total_improvement", 0.0) + improvement
+
+        # EMA update
+        old_ema = effect.get("ema_effect", 0.0)
+        if effect["usage_count"] == 1:
+            effect["ema_effect"] = improvement
+        else:
+            effect["ema_effect"] = self.EMA_DECAY * old_ema + (1 - self.EMA_DECAY) * improvement
+
+        # Update best metric
+        if metric > effect.get("best_metric_with", 0.0):
+            effect["best_metric_with"] = metric
+
+        effect["last_updated"] = datetime.now().isoformat()
+
+    def get_edge_weights(self, task_name: str) -> Dict[str, float]:
+        """
+        Compute dynamic edge weights for a task based on historical effectiveness.
+
+        Args:
+            task_name: Name of the task
+
+        Returns:
+            Dictionary mapping edge types to weights (0.1 to 1.0)
+        """
+        weights = {}
+
+        for edge_type in ALL_EDGE_TYPES:
+            weights[edge_type] = self._compute_single_weight(task_name, edge_type)
+
+        # Normalize to [0.1, 1.0] range
+        if weights:
+            max_w = max(weights.values())
+            min_w = min(weights.values())
+            if max_w > min_w:
+                for et in weights:
+                    normalized = (weights[et] - min_w) / (max_w - min_w)
+                    weights[et] = round(0.1 + 0.9 * normalized, 3)
+            else:
+                for et in weights:
+                    weights[et] = 0.5
+
+        # Log weights
+        weight_str = ", ".join([f"{k}={v:.2f}" for k, v in sorted(weights.items(), key=lambda x: -x[1])])
+        logger.info(f"Memory: Edge weights for {task_name}: {weight_str}")
+
+        return weights
+
+    def _compute_single_weight(self, task_name: str, edge_type: str) -> float:
+        """Compute weight for a single edge type."""
+        # Get prior weight
+        task_priors = self.TASK_PRIOR_WEIGHTS.get(task_name, {})
+        prior_weight = task_priors.get(edge_type, self.BASE_PRIOR_WEIGHTS.get(edge_type, 0.5))
+
+        # Get learned effect (prefer task-specific, fallback to global)
+        task_effects = self.data.get("task_edge_effects", {}).get(task_name, {})
+        global_effects = self.data.get("global_edge_effects", {})
+
+        effect = task_effects.get(edge_type) or global_effects.get(edge_type)
+
+        if not effect or effect.get("usage_count", 0) < self.MIN_SAMPLES:
+            # Not enough samples, use prior
+            return prior_weight
+
+        # Compute learned weight from success rate and EMA
+        usage_count = effect.get("usage_count", 1)
+        success_count = effect.get("success_count", 0)
+        ema_effect = effect.get("ema_effect", 0.0)
+
+        success_rate = success_count / usage_count
+
+        # Normalize EMA to [0, 1] assuming improvement range is [-0.1, 0.1]
+        normalized_ema = max(0, min(1, (ema_effect + 0.1) / 0.2))
+
+        learned_weight = 0.6 * success_rate + 0.4 * normalized_ema
+
+        # Mix prior and learned weights
+        final_weight = (1 - self.LEARNING_RATE) * prior_weight + self.LEARNING_RATE * learned_weight
+
+        return final_weight
+
+    def get_task_edge_effect(self, task_name: str, edge_type: str) -> Optional[EdgeEffect]:
+        """Get edge effect for a specific task."""
+        task_effects = self.data.get("task_edge_effects", {}).get(task_name, {})
+        effect_dict = task_effects.get(edge_type)
+        return EdgeEffect.from_dict(effect_dict) if effect_dict else None
+
+    def get_global_edge_effect(self, edge_type: str) -> Optional[EdgeEffect]:
+        """Get global edge effect."""
+        effect_dict = self.data.get("global_edge_effects", {}).get(edge_type)
+        return EdgeEffect.from_dict(effect_dict) if effect_dict else None
+
+    # ========== Original KGBook Methods (preserved for compatibility) ==========
+
+    @property
+    def book(self) -> Dict[str, Any]:
+        """Compatibility property: access tasks as 'book'."""
+        return self.data.get("tasks", {})
 
     def _init_task(self, task_name: str):
         """Initialize task entry if not exists."""
-        if task_name not in self.book:
-            self.book[task_name] = {
+        if "tasks" not in self.data:
+            self.data["tasks"] = {}
+        if task_name not in self.data["tasks"]:
+            self.data["tasks"][task_name] = {
                 "successful_strategies": [],
                 "best_strategy": None,
                 "best_metric": 0.0,
@@ -122,24 +428,24 @@ class KGBook:
             "context": context
         }
 
-        self.book[task_name]["successful_strategies"].append(entry)
+        self.data["tasks"][task_name]["successful_strategies"].append(entry)
 
         # Update best strategy if this is the best
-        if to_metric > self.book[task_name]["best_metric"]:
-            self.book[task_name]["best_strategy"] = self._clean_strategy(strategy)
-            self.book[task_name]["best_metric"] = round(to_metric, 4)
+        if to_metric > self.data["tasks"][task_name]["best_metric"]:
+            self.data["tasks"][task_name]["best_strategy"] = self._clean_strategy(strategy)
+            self.data["tasks"][task_name]["best_metric"] = round(to_metric, 4)
 
-        self.book[task_name]["last_updated"] = datetime.now().isoformat()
+        self.data["tasks"][task_name]["last_updated"] = datetime.now().isoformat()
 
         # Keep only top 10 strategies per task (by improvement)
-        self.book[task_name]["successful_strategies"] = sorted(
-            self.book[task_name]["successful_strategies"],
+        self.data["tasks"][task_name]["successful_strategies"] = sorted(
+            self.data["tasks"][task_name]["successful_strategies"],
             key=lambda x: x["improvement"],
             reverse=True
         )[:10]
 
         self._save()
-        logger.info(f"KGBOOK: Recorded improvement +{improvement:.4f} for {task_name}")
+        logger.info(f"Memory: Recorded improvement +{improvement:.4f} for {task_name}")
 
     def _clean_strategy(self, strategy: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -199,7 +505,7 @@ class KGBook:
                         "source": "same_task",
                         "strategy": entry["strategy"],
                         "improvement": entry["improvement"],
-                        "improvement_pct": entry["improvement_pct"],
+                        "improvement_pct": entry.get("improvement_pct", 0),
                         "context": entry.get("context", "")
                     })
 
@@ -213,7 +519,7 @@ class KGBook:
                             "source": f"similar_task:{other_task}",
                             "strategy": entry["strategy"],
                             "improvement": entry["improvement"],
-                            "improvement_pct": entry["improvement_pct"],
+                            "improvement_pct": entry.get("improvement_pct", 0),
                             "context": entry.get("context", "")
                         })
 
@@ -303,13 +609,22 @@ class KGBook:
         return "\n".join(lines)
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get KGBOOK statistics."""
+        """Get Memory statistics."""
         stats = {
+            "version": self.data.get("version", "1.0"),
             "total_tasks": len(self.book),
             "total_strategies": sum(
                 len(task.get("successful_strategies", []))
                 for task in self.book.values()
             ),
+            "global_edge_effects": {
+                et: {
+                    "usage": effect.get("usage_count", 0),
+                    "success_rate": effect.get("success_count", 0) / max(effect.get("usage_count", 1), 1),
+                    "ema_effect": effect.get("ema_effect", 0)
+                }
+                for et, effect in self.data.get("global_edge_effects", {}).items()
+            },
             "tasks": {}
         }
 
@@ -323,21 +638,37 @@ class KGBook:
         return stats
 
 
-# Global KGBOOK instance
-_kgbook_instance: Optional[KGBook] = None
+# Alias for backward compatibility
+KGBook = Memory
 
 
-def get_kgbook(book_path: str = "data/kgbook.json") -> KGBook:
+# Global Memory instance with thread-safe initialization
+_memory_instance: Optional[Memory] = None
+_memory_lock = threading.Lock()
+
+
+def get_memory(memory_path: str = "data/memory.json") -> Memory:
     """
-    Get or create global KGBOOK instance.
+    Get or create global Memory instance (thread-safe).
+
+    Uses double-checked locking pattern for efficient thread-safe singleton.
 
     Args:
-        book_path: Path to KGBOOK file
+        memory_path: Path to Memory file
 
     Returns:
-        KGBook instance
+        Memory instance
     """
-    global _kgbook_instance
-    if _kgbook_instance is None:
-        _kgbook_instance = KGBook(book_path)
-    return _kgbook_instance
+    global _memory_instance
+    if _memory_instance is None:
+        with _memory_lock:
+            # Double-check after acquiring lock
+            if _memory_instance is None:
+                _memory_instance = Memory(memory_path)
+    return _memory_instance
+
+
+# Backward compatibility alias
+def get_kgbook(book_path: str = "data/memory.json") -> Memory:
+    """Backward compatibility wrapper for get_memory."""
+    return get_memory(book_path)

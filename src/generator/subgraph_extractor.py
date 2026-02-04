@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 def extract_subgraph(
     gene_id: str,
     strategy: Dict[str, Any],
-    kg: nx.DiGraph
+    kg: nx.DiGraph,
+    edge_weights: Dict[str, float] = None
 ) -> nx.DiGraph:
     """
     Extract a subgraph around a gene based on the strategy.
@@ -31,11 +32,14 @@ def extract_subgraph(
             - max_neighbors: Maximum neighbors per edge type
             - neighbors_per_type: Fine-grained neighbor limits per edge type (optional)
         kg: The full knowledge graph
+        edge_weights: Dynamic weights for each edge type from Memory (0.1-1.0).
+                     Higher weight = more neighbors sampled for that edge type.
 
     Returns:
         NetworkX DiGraph representing the subgraph
     """
     subgraph = nx.DiGraph()
+    edge_weights = edge_weights or {}
 
     # Add the central gene node
     if gene_id in kg.nodes:
@@ -63,10 +67,14 @@ def extract_subgraph(
         # Use per-type neighbor limit if specified, otherwise use global max_neighbors
         effective_max = neighbors_per_type.get(edge_type, max_neighbors)
 
+        # Get dynamic weight for this edge type (default 1.0)
+        weight = edge_weights.get(edge_type, 1.0)
+
         neighbors = get_neighbors(
             kg, gene_id, edge_type,
             max_count=effective_max,
-            method=sampling
+            method=sampling,
+            edge_type_weight=weight
         )
 
         for neighbor_id, edge_data in neighbors:
@@ -91,7 +99,8 @@ def extract_subgraph(
             max_hops=max_hops - 1,
             sampling=sampling,
             max_neighbors=decayed_neighbors,
-            visited=visited
+            visited=visited,
+            edge_weights=edge_weights
         )
 
     logger.debug(f"Extracted subgraph for {gene_id}: {subgraph.number_of_nodes()} nodes, {subgraph.number_of_edges()} edges")
@@ -106,7 +115,8 @@ def expand_subgraph(
     max_hops: int,
     sampling: str,
     max_neighbors: int,
-    visited: Set[str]
+    visited: Set[str],
+    edge_weights: Dict[str, float] = None
 ) -> None:
     """
     Expand the subgraph by exploring neighbors of neighbors.
@@ -122,9 +132,12 @@ def expand_subgraph(
         sampling: Sampling method
         max_neighbors: Max neighbors per hop
         visited: Set of already visited nodes
+        edge_weights: Dynamic weights for each edge type from Memory
     """
     if max_hops <= 0:
         return
+
+    edge_weights = edge_weights or {}
 
     # Get current frontier (nodes at the edge of the subgraph)
     frontier = [n for n in subgraph.nodes() if n != center_gene and n not in visited]
@@ -153,10 +166,15 @@ def expand_subgraph(
 
             # Use more conservative neighbor count division
             effective_max = max(max_neighbors // max(len(gene_frontier), 1), 5)
+
+            # Get dynamic weight for this edge type
+            weight = edge_weights.get(edge_type, 1.0)
+
             neighbors = get_neighbors(
                 kg, node, edge_type,
                 max_count=effective_max,
-                method=sampling
+                method=sampling,
+                edge_type_weight=weight
             )
 
             for neighbor_id, edge_data in neighbors:
@@ -182,7 +200,8 @@ def expand_subgraph(
             max_hops=max_hops - 1,
             sampling=sampling,
             max_neighbors=decayed_neighbors,
-            visited=visited
+            visited=visited,
+            edge_weights=edge_weights
         )
 
 

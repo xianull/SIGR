@@ -36,9 +36,6 @@ from kg_builder.adapters import (
     HPOAdapter,
     CellMarkerAdapter,
     ReactomeAdapter,
-    OMIMAdapter,
-    GTExAdapter,
-    CORUMAdapter,
 )
 
 # Configure logging
@@ -71,10 +68,6 @@ class SIGRKnowledgeGraph:
         data_dir: str = "data/raw",
         output_dir: str = "data/kg",
         string_threshold: int = 700,
-        include_omim: bool = False,
-        include_gtex: bool = False,
-        include_corum: bool = False,
-        gtex_tpm_threshold: float = 1.0,
     ):
         """
         Initialize the KG builder.
@@ -83,18 +76,10 @@ class SIGRKnowledgeGraph:
             data_dir: Directory containing raw data files
             output_dir: Directory for output files
             string_threshold: STRING score threshold (0-1000)
-            include_omim: Include OMIM disease associations
-            include_gtex: Include GTEx tissue expression
-            include_corum: Include CORUM protein complex data
-            gtex_tpm_threshold: TPM threshold for GTEx expression
         """
         self.data_dir = Path(data_dir)
         self.output_dir = Path(output_dir)
         self.string_threshold = string_threshold
-        self.include_omim = include_omim
-        self.include_gtex = include_gtex
-        self.include_corum = include_corum
-        self.gtex_tpm_threshold = gtex_tpm_threshold
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -109,22 +94,9 @@ class SIGRKnowledgeGraph:
         # Statistics
         self.stats = defaultdict(int)
 
-        # Gene set for validation
-        self.valid_genes = set()
-
     def _get_data_path(self, filename: str) -> Path:
         """Get full path to a data file."""
         return self.data_dir / filename
-
-    def _load_valid_genes(self) -> None:
-        """Load the set of valid HGNC gene symbols."""
-        logger.info("Loading valid gene symbols from HGNC...")
-        hgnc_adapter = HGNCAdapter(str(self._get_data_path("hgnc_complete_set.txt")))
-
-        for node_id, _, _ in hgnc_adapter.get_nodes():
-            self.valid_genes.add(node_id)
-
-        logger.info(f"Loaded {len(self.valid_genes)} valid gene symbols")
 
     def _add_gene_nodes(self) -> None:
         """Add gene nodes from HGNC."""
@@ -292,6 +264,60 @@ class SIGRKnowledgeGraph:
         except FileNotFoundError as e:
             logger.warning(f"Reactome data not found: {e}")
 
+    def _add_ncbi_summaries(self, graph: nx.DiGraph) -> None:
+        """
+        Add NCBI gene summaries to gene nodes.
+
+        This persists NCBI summaries directly into the KG file,
+        eliminating the need for runtime loading.
+
+        Args:
+            graph: NetworkX graph to update
+        """
+        summary_file = self._get_data_path("Homo_sapiens_gene_info_with_go_and_pathways.tsv")
+        if not summary_file.exists():
+            logger.warning(f"NCBI summary file not found: {summary_file}")
+            return
+
+        logger.info("Adding NCBI gene summaries to gene nodes...")
+
+        try:
+            import pandas as pd
+
+            # Load with proper NA handling
+            df = pd.read_csv(
+                summary_file,
+                sep='\t',
+                usecols=['Symbol', 'summary'],
+                na_values=['-', ''],
+                low_memory=False
+            )
+
+            # Vectorized processing
+            df = df.dropna(subset=['Symbol', 'summary'])
+            df['Symbol'] = df['Symbol'].astype(str).str.strip().str.upper()
+
+            # Build summary dict
+            summary_dict = dict(zip(df['Symbol'], df['summary']))
+
+            # Update gene nodes in graph
+            updated = 0
+            for node_id in graph.nodes():
+                node_data = graph.nodes[node_id]
+                # Only update gene nodes
+                label = node_data.get('label') or node_data.get('node_label')
+                if label == 'Gene':
+                    symbol = node_id.upper()
+                    if symbol in summary_dict:
+                        graph.nodes[node_id]['ncbi_summary'] = str(summary_dict[symbol])
+                        updated += 1
+
+            self.stats['ncbi_summaries'] = updated
+            logger.info(f"Added NCBI summaries to {updated} gene nodes")
+
+        except Exception as e:
+            logger.warning(f"Error adding NCBI summaries: {e}")
+
     def build(self) -> nx.DiGraph:
         """
         Build the complete knowledge graph.
@@ -321,7 +347,10 @@ class SIGRKnowledgeGraph:
         logger.info("Retrieving NetworkX graph from BioCypher...")
         graph = self.bc.get_kg()
 
-        # 4. Print statistics
+        # 4. Add NCBI summaries to gene nodes (after graph is built)
+        self._add_ncbi_summaries(graph)
+
+        # 5. Print statistics
         elapsed = datetime.now() - start_time
         self._print_statistics(graph, elapsed)
 
