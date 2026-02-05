@@ -20,6 +20,7 @@ DescriptionFocus = Literal['balanced', 'network', 'function', 'phenotype']
 ContextWindow = Literal['minimal', 'local', 'extended', 'full']
 PromptStyle = Literal['analytical', 'narrative', 'structured', 'comparative']
 FeatureSelection = Literal['all', 'essential', 'diverse', 'task_specific']
+NeighborSelectionMode = Literal['retain_all', 'top_k', 'threshold', 'exclude']
 
 
 @dataclass
@@ -48,6 +49,12 @@ class StrategyConfig:
         feature_selection: How to select features for description
         generation_passes: Number of refinement passes (1-3)
 
+        # Neighbor selection parameters (v3)
+        neighbor_selection_mode: How to select neighbors ('retain_all', 'top_k', 'threshold', 'exclude')
+        neighbor_selection_top_k: Number of neighbors for top_k selection
+        neighbor_selection_threshold: Score threshold for threshold selection
+        exclude_neighbors: List of neighbor IDs to exclude
+
         prompt_template: LLM prompt template
         reasoning: LLM's reasoning for this strategy
     """
@@ -71,6 +78,12 @@ class StrategyConfig:
     feature_selection: FeatureSelection = 'all'  # all, essential, diverse, task_specific
     generation_passes: int = 1  # 1-3 passes for refinement
 
+    # Neighbor selection parameters (v3)
+    neighbor_selection_mode: NeighborSelectionMode = 'retain_all'
+    neighbor_selection_top_k: Optional[int] = None  # For top_k mode
+    neighbor_selection_threshold: Optional[float] = None  # For threshold mode
+    exclude_neighbors: List[str] = field(default_factory=list)  # For exclude mode
+
     # Text generation parameters
     prompt_template: str = ""
 
@@ -91,6 +104,8 @@ class StrategyConfig:
             'include_statistics', 'focus_keywords',
             'description_focus', 'context_window', 'prompt_style',
             'feature_selection', 'generation_passes',
+            'neighbor_selection_mode', 'neighbor_selection_top_k',
+            'neighbor_selection_threshold', 'exclude_neighbors',
             'prompt_template', 'reasoning'
         }
         filtered_data = {k: v for k, v in data.items() if k in valid_fields}

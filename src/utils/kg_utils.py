@@ -17,11 +17,18 @@ logger = logging.getLogger(__name__)
 # Edge type mapping from KG labels to simplified names
 EDGE_TYPE_MAPPING = {
     'pairwise molecular interaction': 'PPI',
-    'participates in': 'GO',
+    'participates in': 'GO',  # All GO namespaces use same edge type
     'gene to phenotypic feature association': 'HPO',
     'regulates': 'TRRUST',
     'expressed in': 'CellMarker',
     'in pathway': 'Reactome',
+}
+
+# More granular GO edge types (optional, for fine-grained control)
+GO_NAMESPACE_MAPPING = {
+    'biological_process': 'GO_BP',
+    'molecular_function': 'GO_MF',
+    'cellular_component': 'GO_CC',
 }
 
 # Reverse mapping

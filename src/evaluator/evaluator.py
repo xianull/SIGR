@@ -53,6 +53,10 @@ class TaskEvaluator:
         'geneattribute_lys4_only': lambda kg: GeneAttributeTask(kg, 'lys4_only'),
         'geneattribute_no_methylation': lambda kg: GeneAttributeTask(kg, 'no_methylation'),
         'geneattribute_bivalent': lambda kg: GeneAttributeTask(kg, 'bivalent'),
+        # GenePT benchmark cross-category comparisons
+        'geneattribute_bivalent_vs_no_methylation': lambda kg: GeneAttributeTask(kg, 'bivalent_vs_no_methylation'),
+        'geneattribute_bivalent_vs_lys4_only': lambda kg: GeneAttributeTask(kg, 'bivalent_vs_lys4_only'),
+        'geneattribute_tf_range': lambda kg: GeneAttributeTask(kg, 'tf_range'),
         # Perturbation task requires data_path
         'perturbation': PerturbationTask,
     }
@@ -67,6 +71,9 @@ class TaskEvaluator:
         'geneattribute_lys4_only': 'auc',
         'geneattribute_no_methylation': 'auc',
         'geneattribute_bivalent': 'auc',
+        'geneattribute_bivalent_vs_no_methylation': 'auc',
+        'geneattribute_bivalent_vs_lys4_only': 'auc',
+        'geneattribute_tf_range': 'auc',
         'perturbation': 'delta_correlation',
     }
 
@@ -76,8 +83,9 @@ class TaskEvaluator:
         kg: nx.DiGraph,
         classifier_type: str = 'logistic',
         regressor_type: str = 'ridge',
-        use_cross_validation: bool = False,
+        use_cross_validation: bool = True,
         n_folds: int = 5,
+        use_multiple_classifiers: bool = True,
         enable_adaptive_reward: bool = False,
         data_path: Optional[str] = None,
     ):
@@ -89,8 +97,9 @@ class TaskEvaluator:
             kg: Knowledge graph
             classifier_type: Type of classifier ('logistic' or 'random_forest')
             regressor_type: Type of regressor ('ridge', 'knn', 'mlp') for perturbation
-            use_cross_validation: Whether to use cross-validation
+            use_cross_validation: Whether to use cross-validation (default: True)
             n_folds: Number of folds for cross-validation
+            use_multiple_classifiers: Whether to use both LR and RF classifiers (default: True)
             enable_adaptive_reward: Enable adaptive reward weight adjustment
             data_path: Path to task data (required for perturbation task)
         """
@@ -100,6 +109,7 @@ class TaskEvaluator:
         self.regressor_type = regressor_type
         self.use_cross_validation = use_cross_validation
         self.n_folds = n_folds
+        self.use_multiple_classifiers = use_multiple_classifiers
         self.data_path = data_path
 
         # Load the task
@@ -113,8 +123,9 @@ class TaskEvaluator:
 
         # Handle perturbation task specially (requires data_path)
         if task_name == 'perturbation':
+            # Use default data path if not provided
             if data_path is None:
-                raise ValueError("data_path is required for perturbation task")
+                data_path = 'data/downstreams/genepert/Norman_2019.h5ad'
             self.task = task_factory(kg, data_path)
         elif callable(task_factory) and not isinstance(task_factory, type):
             # It's a lambda/function
@@ -144,7 +155,7 @@ class TaskEvaluator:
         embeddings: Dict[str, np.ndarray],
         test_size: float = 0.2,
         random_state: int = 42
-    ) -> Dict[str, float]:
+    ) -> Dict[str, Any]:
         """
         Evaluate embeddings on the task.
 
@@ -154,37 +165,115 @@ class TaskEvaluator:
             random_state: Random seed for reproducibility
 
         Returns:
-            Dictionary of metrics
+            Dictionary of metrics. If use_multiple_classifiers is True (and not regression),
+            returns nested dict: {'logistic': {...}, 'random_forest': {...}, 'combined': {...}}
         """
         # Prepare data
         X, y = self.task.prepare_data(embeddings)
 
         if len(X) == 0:
             logger.warning(f"No data available for {self.task_name} task")
-            return self._empty_metrics()
+            return self._empty_metrics_multi() if self.use_multiple_classifiers and not self.is_regression else self._empty_metrics()
 
         # Check for invalid embeddings (NaN or Inf)
         if np.any(np.isnan(X)) or np.any(np.isinf(X)):
             logger.error("Invalid embeddings detected (NaN or Inf values)")
-            return self._empty_metrics()
+            return self._empty_metrics_multi() if self.use_multiple_classifiers and not self.is_regression else self._empty_metrics()
 
-        # Choose evaluation method
-        if self.use_cross_validation:
-            metrics = self._evaluate_with_cv(X, y, random_state)
+        # Use multiple classifiers for classification tasks
+        if self.use_multiple_classifiers and not self.is_regression:
+            metrics = self._evaluate_with_all_classifiers(X, y, test_size, random_state)
         else:
-            metrics = self._evaluate_with_split(X, y, test_size, random_state)
+            # Single classifier mode
+            if self.use_cross_validation:
+                metrics = self._evaluate_with_cv(X, y, random_state)
+            else:
+                metrics = self._evaluate_with_split(X, y, test_size, random_state)
 
-        # Add clustering metrics if required
+            # Add clustering metrics if required (single classifier mode only)
+            if self.task.requires_clustering_metrics():
+                try:
+                    clustering_metrics = compute_clustering_metrics(X, y)
+                    metrics.update(clustering_metrics)
+                except Exception as e:
+                    logger.warning(f"Error computing clustering metrics: {e}")
+
+            logger.info(f"Evaluation results for {self.task_name}: "
+                       f"primary={metrics.get(self.primary_metric, 0):.4f}")
+
+        return metrics
+
+    def _evaluate_with_all_classifiers(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        test_size: float,
+        random_state: int
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Evaluate with both LR and RF classifiers using 5-fold CV.
+
+        Returns:
+            Dictionary with 'logistic', 'random_forest', and 'combined' keys
+        """
+        results = {}
+        original_clf = self.classifier_type
+
+        for clf_type in ['logistic', 'random_forest']:
+            self.classifier_type = clf_type
+            if self.use_cross_validation:
+                metrics = self._evaluate_with_cv(X, y, random_state)
+            else:
+                metrics = self._evaluate_with_split(X, y, test_size, random_state)
+            results[clf_type] = metrics
+
+        # Restore original classifier type
+        self.classifier_type = original_clf
+
+        # Compute combined metrics (average of LR and RF)
+        combined = {}
+        metric_keys = ['accuracy', 'f1', 'auc', 'ap']
+        for key in metric_keys:
+            lr_val = results['logistic'].get(key)
+            rf_val = results['random_forest'].get(key)
+            if lr_val is not None and rf_val is not None:
+                combined[key] = (lr_val + rf_val) / 2
+            elif lr_val is not None:
+                combined[key] = lr_val
+            elif rf_val is not None:
+                combined[key] = rf_val
+
+        results['combined'] = combined
+
+        # Add clustering metrics to combined
         if self.task.requires_clustering_metrics():
             try:
                 clustering_metrics = compute_clustering_metrics(X, y)
-                metrics.update(clustering_metrics)
+                results['combined'].update(clustering_metrics)
             except Exception as e:
                 logger.warning(f"Error computing clustering metrics: {e}")
 
-        logger.info(f"Evaluation results for {self.task_name}: "
-                   f"primary={metrics.get(self.primary_metric, 0):.4f}")
-        return metrics
+        # Log results
+        logger.info(f"Evaluation results for {self.task_name}:")
+        logger.info(f"  LR:  AUC={results['logistic'].get('auc', 0):.4f}, "
+                   f"F1={results['logistic'].get('f1', 0):.4f}, "
+                   f"Acc={results['logistic'].get('accuracy', 0):.4f}")
+        logger.info(f"  RF:  AUC={results['random_forest'].get('auc', 0):.4f}, "
+                   f"F1={results['random_forest'].get('f1', 0):.4f}, "
+                   f"Acc={results['random_forest'].get('accuracy', 0):.4f}")
+        logger.info(f"  Avg: AUC={combined.get('auc', 0):.4f}, "
+                   f"F1={combined.get('f1', 0):.4f}")
+
+        return results
+
+    def _empty_metrics_multi(self) -> Dict[str, Dict[str, float]]:
+        """Return empty/default metrics for multi-classifier mode."""
+        empty = {'accuracy': 0.0, 'f1': 0.0, 'auc': 0.5, 'ap': 0.5}
+        return {
+            'logistic': empty.copy(),
+            'random_forest': empty.copy(),
+            'combined': empty.copy()
+        }
 
     def _evaluate_with_cv(
         self,
@@ -402,9 +491,22 @@ class TaskEvaluator:
 
         return results
 
+    def _get_primary_metric_value(self, metrics: Dict[str, Any]) -> float:
+        """
+        Extract primary metric value from metrics dict.
+
+        Handles both single-classifier and multi-classifier formats.
+        """
+        if self.use_multiple_classifiers and 'combined' in metrics:
+            # Multi-classifier format: use combined metrics
+            return metrics['combined'].get(self.primary_metric, 0.0)
+        else:
+            # Single classifier format
+            return metrics.get(self.primary_metric, 0.0)
+
     def compute_reward(
         self,
-        metrics: Dict[str, float],
+        metrics: Dict[str, Any],
         history: Optional[List[float]] = None
     ) -> float:
         """
@@ -414,13 +516,13 @@ class TaskEvaluator:
         improvement over history for clearer learning signals.
 
         Args:
-            metrics: Dictionary of metrics
+            metrics: Dictionary of metrics (single or multi-classifier format)
             history: List of previous primary metric values (oldest to newest)
 
         Returns:
             Reward value (normalized to [-1, 1])
         """
-        current_metric = metrics.get(self.primary_metric, 0.0)
+        current_metric = self._get_primary_metric_value(metrics)
 
         # Always use RewardComputer for consistent normalization
         # For first iteration (no history), it returns absolute_reward in [-1, 1]
@@ -433,25 +535,25 @@ class TaskEvaluator:
 
     def compute_reward_detailed(
         self,
-        metrics: Dict[str, float],
+        metrics: Dict[str, Any],
         history: Optional[List[float]] = None
     ) -> RewardResult:
         """
         Compute detailed reward breakdown.
 
         Args:
-            metrics: Dictionary of metrics
+            metrics: Dictionary of metrics (single or multi-classifier format)
             history: List of previous primary metric values
 
         Returns:
             RewardResult with full breakdown
         """
-        current_metric = metrics.get(self.primary_metric, 0.0)
+        current_metric = self._get_primary_metric_value(metrics)
         return self.reward_computer.compute(current_metric, history)
 
     def compute_reward_signal(
         self,
-        metrics: Dict[str, float],
+        metrics: Dict[str, Any],
         history: Optional[List[float]] = None,
         strategy_distance: float = 0.0
     ) -> RewardSignal:
@@ -459,21 +561,21 @@ class TaskEvaluator:
         计算科学发现范式的结构化奖励信号 (Scientist-style Reward Signal)
 
         Args:
-            metrics: 评估指标字典
+            metrics: 评估指标字典 (单分类器或多分类器格式)
             history: 历史指标列表
             strategy_distance: 策略距离 [0, 1]
 
         Returns:
             RewardSignal: 结构化奖励信号
         """
-        current_metric = metrics.get(self.primary_metric, 0.0)
+        current_metric = self._get_primary_metric_value(metrics)
         return self.reward_computer.compute_signal(
             current_metric, history, strategy_distance
         )
 
     def generate_feedback(
         self,
-        metrics: Dict[str, float],
+        metrics: Dict[str, Any],
         embeddings: Optional[Dict[str, np.ndarray]] = None,
         descriptions: Optional[Dict[str, str]] = None,
         best_metric: Optional[float] = None
@@ -482,7 +584,7 @@ class TaskEvaluator:
         Generate feedback for the Actor.
 
         Args:
-            metrics: Evaluation metrics
+            metrics: Evaluation metrics (single or multi-classifier format)
             embeddings: Gene embeddings (for analysis)
             descriptions: Gene descriptions (for analysis)
             best_metric: Best metric achieved so far (for comparison)
@@ -491,7 +593,12 @@ class TaskEvaluator:
             Feedback string
         """
         from .feedback import generate_feedback
-        return generate_feedback(self.task_name, metrics, embeddings, descriptions, best_metric)
+        # For multi-classifier format, use combined metrics for feedback
+        if self.use_multiple_classifiers and 'combined' in metrics:
+            feedback_metrics = metrics['combined']
+        else:
+            feedback_metrics = metrics
+        return generate_feedback(self.task_name, feedback_metrics, embeddings, descriptions, best_metric)
 
     @classmethod
     def get_available_tasks(cls) -> list:

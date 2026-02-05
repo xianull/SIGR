@@ -46,6 +46,30 @@ biological process:
     namespace: str
     definition: str
 
+molecular function:
+  # Maps to biolink:MolecularActivity
+  is_a: biological process or activity
+  represented_as: node
+  preferred_id: go
+  input_label: MolecularFunction
+  properties:
+    go_id: str
+    name: str
+    namespace: str
+    definition: str
+
+cellular component:
+  # Maps to biolink:CellularComponent
+  is_a: anatomical entity
+  represented_as: node
+  preferred_id: go
+  input_label: CellularComponent
+  properties:
+    go_id: str
+    name: str
+    namespace: str
+    definition: str
+
 phenotypic feature:
   # Maps to biolink:PhenotypicFeature
   is_a: biological entity
@@ -149,14 +173,14 @@ regulates:
     pubmed_id: str
     source_database: str
 
-# Gene-GO Annotations
+# Gene-GO Annotations (all namespaces: BP, MF, CC)
 participates in:
   # Maps to biolink:ParticipatesIn
   is_a: association
   represented_as: edge
   input_label: PARTICIPATES_IN
   source: gene
-  target: biological process
+  target: [biological process, molecular function, cellular component]
   properties:
     evidence_code: str
     qualifier: str

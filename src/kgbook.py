@@ -646,6 +646,175 @@ class Memory:
 
         return stats
 
+    # ========== Neighbor Selection Tracking (v3) ==========
+
+    def record_neighbor_selection_effect(
+        self,
+        task_name: str,
+        gene: str,
+        selected_neighbors: List[str],
+        excluded_neighbors: List[str],
+        reward_delta: float
+    ):
+        """
+        Record the effect of neighbor selection on performance.
+
+        This helps the system learn which neighbors are typically noise
+        vs useful for specific tasks.
+
+        Args:
+            task_name: Name of the task
+            gene: Center gene ID
+            selected_neighbors: List of selected neighbor IDs
+            excluded_neighbors: List of excluded neighbor IDs
+            reward_delta: Change in reward after this selection
+        """
+        # Initialize neighbor selection tracking if needed
+        if "neighbor_selection_effects" not in self.data:
+            self.data["neighbor_selection_effects"] = {}
+        if task_name not in self.data["neighbor_selection_effects"]:
+            self.data["neighbor_selection_effects"][task_name] = {
+                "exclusion_effects": {},  # neighbor_id -> effect stats
+                "selection_count": 0
+            }
+
+        task_effects = self.data["neighbor_selection_effects"][task_name]
+        task_effects["selection_count"] = task_effects.get("selection_count", 0) + 1
+
+        is_improvement = reward_delta > 0
+
+        # Track effect of exclusions
+        for neighbor_id in excluded_neighbors:
+            if neighbor_id not in task_effects["exclusion_effects"]:
+                task_effects["exclusion_effects"][neighbor_id] = {
+                    "exclusion_count": 0,
+                    "improvement_count": 0,
+                    "total_improvement": 0.0,
+                    "ema_effect": 0.0
+                }
+
+            effect = task_effects["exclusion_effects"][neighbor_id]
+            effect["exclusion_count"] += 1
+
+            if is_improvement:
+                effect["improvement_count"] += 1
+
+            effect["total_improvement"] += reward_delta
+
+            # EMA update
+            old_ema = effect.get("ema_effect", 0.0)
+            if effect["exclusion_count"] == 1:
+                effect["ema_effect"] = reward_delta
+            else:
+                effect["ema_effect"] = self.EMA_DECAY * old_ema + (1 - self.EMA_DECAY) * reward_delta
+
+        self._save()
+
+        if excluded_neighbors:
+            logger.debug(
+                f"Memory: Recorded neighbor selection for {task_name}: "
+                f"excluded {len(excluded_neighbors)}, reward_delta={reward_delta:+.4f}"
+            )
+
+    def get_neighbor_selection_suggestions(
+        self,
+        task_name: str,
+        neighbors: List[str]
+    ) -> Dict[str, float]:
+        """
+        Get suggestions for neighbor selection based on history.
+
+        Returns a score for each neighbor based on historical exclusion effects.
+        Higher score = more likely to be beneficial to include (i.e., NOT exclude).
+
+        Args:
+            task_name: Name of the task
+            neighbors: List of neighbor IDs to evaluate
+
+        Returns:
+            Dictionary mapping neighbor_id to score [0, 1]
+        """
+        suggestions = {}
+
+        task_effects = self.data.get("neighbor_selection_effects", {}).get(task_name, {})
+        exclusion_effects = task_effects.get("exclusion_effects", {})
+
+        for neighbor_id in neighbors:
+            if neighbor_id in exclusion_effects:
+                effect = exclusion_effects[neighbor_id]
+                exclusion_count = effect.get("exclusion_count", 0)
+                improvement_count = effect.get("improvement_count", 0)
+                ema = effect.get("ema_effect", 0.0)
+
+                if exclusion_count > 0:
+                    # If excluding this neighbor usually improves performance,
+                    # it's likely noise (lower score = more likely to exclude)
+                    exclusion_success_rate = improvement_count / exclusion_count
+
+                    # Transform: if exclusion improves performance, neighbor is noise
+                    # So we want to return a LOW score for noisy neighbors
+                    # and a HIGH score for useful neighbors
+                    # exclusion_success_rate high -> neighbor is noise -> low score
+                    base_score = 1 - exclusion_success_rate
+
+                    # Adjust based on EMA (positive EMA when excluded = noise)
+                    # Normalize EMA to [-0.1, 0.1] range
+                    ema_adjustment = -ema * 5  # Scale and negate
+                    ema_adjustment = max(-0.3, min(0.3, ema_adjustment))
+
+                    score = base_score + ema_adjustment
+                    suggestions[neighbor_id] = max(0.0, min(1.0, score))
+                else:
+                    suggestions[neighbor_id] = 0.5  # Unknown
+            else:
+                suggestions[neighbor_id] = 0.5  # No history, neutral
+
+        return suggestions
+
+    def get_commonly_excluded_neighbors(
+        self,
+        task_name: str,
+        min_exclusions: int = 3,
+        min_success_rate: float = 0.6
+    ) -> List[str]:
+        """
+        Get neighbors that are commonly excluded with positive effect.
+
+        These are likely housekeeping genes or other noise sources.
+
+        Args:
+            task_name: Name of the task
+            min_exclusions: Minimum times excluded to be considered
+            min_success_rate: Minimum success rate when excluded
+
+        Returns:
+            List of neighbor IDs that are likely noise
+        """
+        noisy_neighbors = []
+
+        task_effects = self.data.get("neighbor_selection_effects", {}).get(task_name, {})
+        exclusion_effects = task_effects.get("exclusion_effects", {})
+
+        for neighbor_id, effect in exclusion_effects.items():
+            exclusion_count = effect.get("exclusion_count", 0)
+            improvement_count = effect.get("improvement_count", 0)
+
+            if exclusion_count >= min_exclusions:
+                success_rate = improvement_count / exclusion_count
+                if success_rate >= min_success_rate:
+                    noisy_neighbors.append(neighbor_id)
+
+        return noisy_neighbors
+
+    def get_edge_effectiveness(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get edge type effectiveness data for neighbor scoring.
+
+        Returns:
+            Dictionary mapping edge_type to effectiveness stats
+        """
+        return self.data.get("global_edge_effects", {})
+
 
 # Alias for backward compatibility
 KGBook = Memory

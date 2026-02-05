@@ -20,6 +20,8 @@ __all__ = [
     'TASK_IMPLICIT_SIGNALS',
     'MODE_CONSTRAINTS',
     'TASK_DIAGNOSIS_QUESTIONS',
+    'NEIGHBOR_ANALYSIS_SECTION_TEMPLATE',
+    'NEIGHBOR_SELECTION_GUIDANCE',
     # Functions
     'get_reflection_prompt',
     'get_prompt_optimization_prompt',
@@ -30,6 +32,7 @@ __all__ = [
     'get_biologist_reflection_prompt',
     'get_bio_cot_prompt',
     'format_strategy_summary',
+    'get_neighbor_analysis_prompt_section',
 ]
 
 
@@ -1549,3 +1552,83 @@ def format_strategy_summary(strategy: Dict) -> str:
         f"edge_types={edge_types}, max_neighbors={max_neighbors}, "
         f"sampling={sampling}, max_hops={max_hops}, description_length={desc_length}"
     )
+
+
+# =============================================================================
+# Neighbor Analysis Templates (for noise identification)
+# =============================================================================
+
+NEIGHBOR_ANALYSIS_SECTION_TEMPLATE = """
+## Neighbor Relevance Analysis
+
+For the genes in this batch, I've analyzed the relevance of each KG neighbor.
+This helps you identify which neighbors are likely useful context vs potential noise.
+
+{neighbor_analysis}
+
+"""
+
+NEIGHBOR_SELECTION_GUIDANCE = """
+## Neighbor Selection Options
+
+Based on the neighbor analysis above, you may optionally adjust which neighbors
+are included in the context. This helps filter out noisy neighbors.
+
+**Available selection modes:**
+
+1. **retain_all** (default): Keep all neighbors
+   ```json
+   "neighbor_selection_mode": "retain_all"
+   ```
+
+2. **top_k**: Keep only the top k highest-scoring neighbors
+   ```json
+   "neighbor_selection_mode": "top_k",
+   "neighbor_selection_top_k": 15
+   ```
+   Recommended when: Too many neighbors are diluting the signal.
+
+3. **threshold**: Keep neighbors with score >= threshold
+   ```json
+   "neighbor_selection_mode": "threshold",
+   "neighbor_selection_threshold": 0.5
+   ```
+   Recommended when: Want to remove only clearly noisy neighbors.
+
+4. **exclude**: Explicitly exclude specific neighbors by ID
+   ```json
+   "neighbor_selection_mode": "exclude",
+   "exclude_neighbors": ["GAPDH", "ACTB", "UBC"]
+   ```
+   Recommended when: Specific neighbors are known housekeeping/noisy genes.
+
+**Guidelines:**
+- If many neighbors have low relevance scores, consider using threshold or top_k
+- If neighbor analysis shows high average scores, retain_all is likely fine
+- Common housekeeping genes (GAPDH, ACTB, UBC) are often noise for specific tasks
+"""
+
+
+def get_neighbor_analysis_prompt_section(
+    neighbor_analysis_text: str,
+    include_guidance: bool = True,
+) -> str:
+    """
+    Generate the neighbor analysis section for Actor prompts.
+
+    Args:
+        neighbor_analysis_text: Formatted neighbor analysis from NeighborPresenter
+        include_guidance: Whether to include selection guidance
+
+    Returns:
+        Complete prompt section for neighbor analysis
+    """
+    section = NEIGHBOR_ANALYSIS_SECTION_TEMPLATE.format(
+        neighbor_analysis=neighbor_analysis_text
+    )
+
+    if include_guidance:
+        section += NEIGHBOR_SELECTION_GUIDANCE
+
+    return section
+

@@ -155,7 +155,7 @@ class SIGRKnowledgeGraph:
         try:
             go_adapter = GOAdapter(
                 str(self._get_data_path("goa_human.gaf.gz")),
-                namespaces=['P'],  # Biological Process only
+                namespaces=['P', 'F', 'C'],  # All: Biological Process, Molecular Function, Cellular Component
             )
 
             # Add GO term nodes
@@ -305,8 +305,8 @@ class SIGRKnowledgeGraph:
             for node_id in graph.nodes():
                 node_data = graph.nodes[node_id]
                 # Only update gene nodes
-                label = node_data.get('label') or node_data.get('node_label')
-                if label == 'Gene':
+                label = node_data.get('label') or node_data.get('node_label') or ''
+                if label.lower() == 'gene':
                     symbol = node_id.upper()
                     if symbol in summary_dict:
                         graph.nodes[node_id]['ncbi_summary'] = str(summary_dict[symbol])

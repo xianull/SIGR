@@ -2,16 +2,145 @@
 Subgraph Extraction for SIGR Framework
 
 Extracts subgraphs from the knowledge graph based on Actor's strategy.
+Supports neighbor scoring and selection for noise filtering.
 """
 
 import logging
-from typing import Dict, List, Tuple, Any, Set
+from typing import Dict, List, Tuple, Any, Set, Optional
 
+import numpy as np
 import networkx as nx
 
 from ..utils.kg_utils import get_neighbors, EDGE_LABEL_MAPPING
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Neighbor Scoring Integration
+# =============================================================================
+
+def extract_subgraph_with_scoring(
+    gene_id: str,
+    strategy: Dict[str, Any],
+    kg: nx.DiGraph,
+    edge_weights: Dict[str, float] = None,
+    task_genes: Optional[Set[str]] = None,
+    memory: Optional[Any] = None,
+    embeddings: Optional[Dict[str, np.ndarray]] = None,
+    enable_neighbor_selection: bool = False,
+) -> Tuple[nx.DiGraph, Optional[Dict[str, Any]]]:
+    """
+    Extract a subgraph with optional neighbor scoring and selection.
+
+    This is an enhanced version of extract_subgraph that supports:
+    1. Neighbor relevance scoring
+    2. Actor-guided neighbor selection
+    3. Filtering of low-relevance neighbors
+
+    Args:
+        gene_id: The central gene symbol
+        strategy: Strategy dictionary (see extract_subgraph for details)
+        kg: The full knowledge graph
+        edge_weights: Dynamic weights for each edge type from Memory
+        task_genes: Set of task-relevant genes for scoring
+        memory: Memory instance for historical effectiveness
+        embeddings: Embeddings for semantic scoring
+        enable_neighbor_selection: Whether to apply neighbor selection
+
+    Returns:
+        Tuple of (subgraph, neighbor_scores_info)
+        - subgraph: NetworkX DiGraph representing the subgraph
+        - neighbor_scores_info: Dictionary with scoring details (or None if disabled)
+    """
+    # First, extract the full subgraph
+    subgraph = extract_subgraph(gene_id, strategy, kg, edge_weights)
+
+    # If neighbor selection is not enabled, return as-is
+    if not enable_neighbor_selection:
+        return subgraph, None
+
+    # Import scoring components
+    try:
+        from .neighbor_scorer import NeighborScorer
+        from ..actor.neighbor_selector import NeighborSelector, NeighborSelectionPolicy
+    except ImportError:
+        logger.warning("Neighbor scoring modules not available, skipping selection")
+        return subgraph, None
+
+    # Get selection policy from strategy
+    selection_mode = strategy.get('neighbor_selection_mode', 'retain_all')
+
+    # If retain_all, no need to score/filter
+    if selection_mode == 'retain_all':
+        return subgraph, {'mode': 'retain_all', 'filtered': False}
+
+    # Score neighbors
+    scorer = NeighborScorer(kg)
+
+    # Get center gene embedding if available
+    center_embedding = embeddings.get(gene_id) if embeddings else None
+
+    # Collect all neighbors from subgraph
+    neighbors = []
+    for _, neighbor, data in subgraph.out_edges(gene_id, data=True):
+        edge_type = data.get('edge_type', 'unknown')
+        neighbors.append((neighbor, edge_type, 'out'))
+
+    # Score all neighbors
+    scores = scorer.score_neighbors(
+        center_gene=gene_id,
+        neighbors=neighbors,
+        task_genes=task_genes,
+        memory=memory,
+        embeddings=embeddings,
+        center_embedding=center_embedding,
+    )
+
+    # Create selection policy
+    policy = NeighborSelectionPolicy(
+        mode=selection_mode,
+        top_k=strategy.get('neighbor_selection_top_k'),
+        threshold=strategy.get('neighbor_selection_threshold'),
+        exclude_neighbors=strategy.get('exclude_neighbors'),
+    )
+
+    # Apply selection
+    selector = NeighborSelector()
+    result = selector.apply_selection(scores, policy)
+
+    # Filter subgraph based on selection
+    if result.excluded:
+        excluded_set = set(result.excluded)
+        nodes_to_remove = []
+
+        # Identify nodes to remove (only direct neighbors, not multi-hop)
+        for node in subgraph.nodes():
+            if node != gene_id and node in excluded_set:
+                nodes_to_remove.append(node)
+
+        # Remove excluded nodes
+        for node in nodes_to_remove:
+            subgraph.remove_node(node)
+
+        logger.debug(
+            f"Neighbor selection for {gene_id}: removed {len(nodes_to_remove)} nodes, "
+            f"kept {len(result.selected)}"
+        )
+
+    # Prepare scoring info
+    scoring_info = {
+        'mode': selection_mode,
+        'filtered': True,
+        'original_count': len(neighbors),
+        'selected_count': len(result.selected),
+        'excluded_count': len(result.excluded),
+        'selection_rate': result.stats.get('selection_rate', 1.0),
+        'avg_selected_score': result.stats.get('avg_selected_score', 0.5),
+        'scores': {n: s.to_dict() for n, s in scores.items()},
+    }
+
+    return subgraph, scoring_info
 
 
 def extract_subgraph(
@@ -233,3 +362,115 @@ def get_subgraph_stats(subgraph: nx.DiGraph) -> Dict[str, Any]:
         'node_types': node_types,
         'edge_types': edge_types,
     }
+
+
+# =============================================================================
+# Batch Processing with Scoring
+# =============================================================================
+
+def extract_subgraphs_batch_with_scoring(
+    gene_ids: List[str],
+    strategy: Dict[str, Any],
+    kg: nx.DiGraph,
+    edge_weights: Dict[str, float] = None,
+    task_genes: Optional[Set[str]] = None,
+    memory: Optional[Any] = None,
+    embeddings: Optional[Dict[str, np.ndarray]] = None,
+    enable_neighbor_selection: bool = False,
+) -> Tuple[Dict[str, nx.DiGraph], Dict[str, Dict[str, Any]]]:
+    """
+    Extract subgraphs for multiple genes with scoring.
+
+    Args:
+        gene_ids: List of gene IDs to process
+        strategy: Strategy dictionary
+        kg: Knowledge graph
+        edge_weights: Dynamic edge weights
+        task_genes: Task-relevant genes
+        memory: Memory instance
+        embeddings: Embeddings dictionary
+        enable_neighbor_selection: Whether to enable selection
+
+    Returns:
+        Tuple of (subgraphs_dict, scoring_info_dict)
+    """
+    subgraphs = {}
+    scoring_info = {}
+
+    for gene_id in gene_ids:
+        subgraph, info = extract_subgraph_with_scoring(
+            gene_id=gene_id,
+            strategy=strategy,
+            kg=kg,
+            edge_weights=edge_weights,
+            task_genes=task_genes,
+            memory=memory,
+            embeddings=embeddings,
+            enable_neighbor_selection=enable_neighbor_selection,
+        )
+        subgraphs[gene_id] = subgraph
+        if info:
+            scoring_info[gene_id] = info
+
+    return subgraphs, scoring_info
+
+
+def get_neighbor_analysis_for_actor(
+    gene_ids: List[str],
+    strategy: Dict[str, Any],
+    kg: nx.DiGraph,
+    task_genes: Optional[Set[str]] = None,
+    memory: Optional[Any] = None,
+    embeddings: Optional[Dict[str, np.ndarray]] = None,
+    presentation_mode: str = 'summary',
+) -> str:
+    """
+    Get formatted neighbor analysis for Actor prompt.
+
+    This is a convenience function that:
+    1. Scores neighbors for given genes
+    2. Formats the results for Actor consumption
+
+    Args:
+        gene_ids: List of gene IDs to analyze
+        strategy: Current strategy
+        kg: Knowledge graph
+        task_genes: Task-relevant genes
+        memory: Memory instance
+        embeddings: Embeddings dictionary
+        presentation_mode: How to format output ('summary', 'detailed', 'minimal')
+
+    Returns:
+        Formatted text for inclusion in Actor prompt
+    """
+    try:
+        from .neighbor_scorer import NeighborScorer
+        from .neighbor_presenter import NeighborPresenter, format_neighbor_analysis_section
+    except ImportError:
+        logger.warning("Neighbor analysis modules not available")
+        return ""
+
+    scorer = NeighborScorer(kg)
+    all_scores = {}
+
+    edge_types = strategy.get('edge_types', ['PPI', 'GO', 'HPO'])
+
+    for gene_id in gene_ids:
+        scores = scorer.score_all_neighbors_for_gene(
+            gene_id=gene_id,
+            edge_types=edge_types,
+            task_genes=task_genes,
+            memory=memory,
+            embeddings=embeddings,
+        )
+        if scores:
+            all_scores[gene_id] = scores
+
+    if not all_scores:
+        return "No neighbor analysis available."
+
+    return format_neighbor_analysis_section(
+        all_scores=all_scores,
+        mode=presentation_mode,
+        include_guidance=True,
+    )

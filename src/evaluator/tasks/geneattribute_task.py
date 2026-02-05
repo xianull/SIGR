@@ -60,6 +60,27 @@ class GeneAttributeTask(BaseTask):
             'format': 'positive_list',
             'metric': 'auc',
             'description': 'Genes with bivalent chromatin marks'
+        },
+        # Cross-category comparisons (GenePT benchmark tasks)
+        'bivalent_vs_no_methylation': {
+            'positive_file': 'bivalent_gene_labels.txt',
+            'negative_file': 'no_methylation_gene_labels.txt',
+            'format': 'two_file_comparison',
+            'metric': 'auc',
+            'description': 'Bivalent vs non-methylated genes (GenePT benchmark)'
+        },
+        'bivalent_vs_lys4_only': {
+            'positive_file': 'bivalent_gene_labels.txt',
+            'negative_file': 'lys4_only_gene_labels.txt',
+            'format': 'two_file_comparison',
+            'metric': 'auc',
+            'description': 'Bivalent vs H3K4me1-only genes (GenePT benchmark)'
+        },
+        'tf_range': {
+            'file': 'dosage_sens_tf_labels.csv',
+            'format': 'tf_range',
+            'metric': 'auc',
+            'description': 'TF range classification (dosage sensitive TFs)'
         }
     }
 
@@ -92,7 +113,14 @@ class GeneAttributeTask(BaseTask):
         self.data_dir = data_dir or self.DEFAULT_DATA_DIR
         self.negative_ratio = negative_ratio
 
-        data_path = os.path.join(self.data_dir, self.subtask_config['file'])
+        # Determine data path based on format
+        fmt = self.subtask_config.get('format', '')
+        if fmt == 'two_file_comparison':
+            # Use positive file as primary data path
+            data_path = os.path.join(self.data_dir, self.subtask_config['positive_file'])
+        else:
+            data_path = os.path.join(self.data_dir, self.subtask_config['file'])
+
         super().__init__(f'geneattribute_{subtask}', kg, data_path)
 
         self._positive_genes: Set[str] = set()
@@ -110,6 +138,10 @@ class GeneAttributeTask(BaseTask):
             self._load_csv_two_column()
         elif fmt == 'positive_list':
             self._load_positive_list()
+        elif fmt == 'two_file_comparison':
+            self._load_two_file_comparison()
+        elif fmt == 'tf_range':
+            self._load_tf_range()
         else:
             raise ValueError(f"Unknown format: {fmt}")
 
@@ -149,6 +181,37 @@ class GeneAttributeTask(BaseTask):
             )
         # Negative genes will be sampled later
         self._negative_genes = set()
+
+    def _load_two_file_comparison(self):
+        """Load two files for cross-category comparison (e.g., bivalent vs no_methylation)."""
+        # Load positive genes from positive_file
+        positive_file = os.path.join(self.data_dir, self.subtask_config['positive_file'])
+        with open(positive_file, 'r') as f:
+            self._positive_genes = set(
+                line.strip() for line in f
+                if line.strip() and not line.startswith('#')
+            )
+
+        # Load negative genes from negative_file
+        negative_file = os.path.join(self.data_dir, self.subtask_config['negative_file'])
+        with open(negative_file, 'r') as f:
+            self._negative_genes = set(
+                line.strip() for line in f
+                if line.strip() and not line.startswith('#')
+            )
+
+        # Remove overlap (genes in both categories are ambiguous)
+        overlap = self._positive_genes & self._negative_genes
+        if overlap:
+            logger.warning(f"Removing {len(overlap)} overlapping genes from both classes")
+            self._positive_genes -= overlap
+            self._negative_genes -= overlap
+
+    def _load_tf_range(self):
+        """Load TF range data (same as dosage sensitivity but may filter differently)."""
+        # For TF range, we use the same dosage sensitivity CSV
+        # This task is essentially the same as dosage_sensitivity
+        self._load_csv_two_column()
 
     def _sample_negatives(
         self,

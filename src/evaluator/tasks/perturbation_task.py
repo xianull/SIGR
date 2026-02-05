@@ -49,11 +49,14 @@ class PerturbationTask(BaseTask):
     """
 
     # Control condition identifiers
-    CONTROL_NAMES = {'control', 'ctrl', 'non-targeting', 'Control', 'CTRL', 'NT'}
+    CONTROL_NAMES = {'control', 'ctrl', 'non-targeting', 'Control', 'CTRL', 'NT', 'neg_ctrl'}
 
     # Common column names for condition
-    CONDITION_COLUMNS = ['condition', 'perturbation_name', 'gene', 'perturbation',
+    CONDITION_COLUMNS = ['perturbation_name', 'condition', 'perturbation', 'gene',
                          'target_gene', 'guide']
+
+    # Symbols for double perturbations
+    DOUBLE_PERTURBATION_SYMBOLS = ['+', '_', ',', '&']
 
     def __init__(
         self,
@@ -145,8 +148,10 @@ class PerturbationTask(BaseTask):
                 continue
 
             # Skip double perturbations if requested
-            if self.exclude_double_perturbation and '+' in str(cond):
-                continue
+            if self.exclude_double_perturbation:
+                is_double = any(sym in str(cond) for sym in self.DOUBLE_PERTURBATION_SYMBOLS)
+                if is_double:
+                    continue
 
             # Check minimum cells
             mask = self.adata.obs['condition'] == cond

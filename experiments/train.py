@@ -174,7 +174,14 @@ Examples:
     parser.add_argument(
         '--cross-validation',
         action='store_true',
-        help='Use 5-fold cross-validation for evaluation'
+        default=True,
+        help='Use 5-fold cross-validation for evaluation (default: enabled)'
+    )
+
+    parser.add_argument(
+        '--no-cross-validation',
+        action='store_true',
+        help='Disable cross-validation, use train/test split instead'
     )
 
     parser.add_argument(
@@ -182,6 +189,19 @@ Examples:
         type=int,
         default=5,
         help='Number of folds for cross-validation (default: 5)'
+    )
+
+    parser.add_argument(
+        '--single-classifier',
+        action='store_true',
+        help='Use single classifier (LR) instead of both LR and RF'
+    )
+
+    # Neighbor selection
+    parser.add_argument(
+        '--enable-neighbor-selection',
+        action='store_true',
+        help='Enable neighbor scoring and selection for noise filtering'
     )
 
     # Checkpoint/Resume
@@ -223,6 +243,22 @@ Examples:
         '--no-cot',
         action='store_true',
         help='Disable Chain-of-Thought enhanced reasoning'
+    )
+
+    # Encoder configuration
+    parser.add_argument(
+        '--encoder-type',
+        type=str,
+        choices=['local', 'api'],
+        default='local',
+        help='Encoder type: local (SentenceTransformer) or api (OpenAI embedding API)'
+    )
+
+    parser.add_argument(
+        '--embedding-model',
+        type=str,
+        default='text-embedding-ada-002',
+        help='Embedding model name for API mode (default: text-embedding-ada-002)'
     )
 
     return parser.parse_args()
@@ -320,6 +356,10 @@ def main():
         task_name = tasks_to_run[0]
         # Determine model mode (dual is default unless --single-model is specified)
         use_dual = args.use_dual_model and not args.single_model
+        # Determine cross-validation (enabled by default unless --no-cross-validation)
+        use_cv = args.cross_validation and not args.no_cross_validation
+        # Determine multiple classifiers (enabled by default unless --single-classifier)
+        use_multi_clf = not args.single_classifier
         best_strategy = run_training(
             task_name=task_name,
             kg_path=args.kg_path,
@@ -334,15 +374,21 @@ def main():
             use_dual_model=use_dual,
             fast_model=args.fast_model,
             strong_model=args.strong_model,
-            use_cross_validation=args.cross_validation,
+            use_cross_validation=use_cv,
             n_folds=args.n_folds,
+            use_multiple_classifiers=use_multi_clf,
             max_workers=args.max_workers,
             checkpoint_interval=args.checkpoint_interval,
             resume_from=args.resume_from,
             # Self-verification options
             enable_self_critique=not args.no_self_critique,
             enable_consistency_check=not args.no_consistency_check,
-            enable_cot_reasoning=not args.no_cot
+            enable_cot_reasoning=not args.no_cot,
+            # Neighbor selection
+            enable_neighbor_selection=args.enable_neighbor_selection,
+            # Encoder options
+            encoder_type=args.encoder_type,
+            embedding_model=args.embedding_model
         )
 
         print("\n" + "="*70)

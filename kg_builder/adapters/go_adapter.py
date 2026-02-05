@@ -103,6 +103,13 @@ class GOAdapter:
             f"{len(self._annotations)} annotations"
         )
 
+    # Node label mapping based on namespace
+    NODE_LABEL_MAP = {
+        'biological_process': 'BiologicalProcess',
+        'molecular_function': 'MolecularFunction',
+        'cellular_component': 'CellularComponent',
+    }
+
     def get_nodes(self) -> Generator[tuple, None, None]:
         """
         Yield GO term nodes in BioCypher format.
@@ -113,13 +120,16 @@ class GOAdapter:
         self._load_data()
 
         for go_id, info in self._go_terms.items():
+            namespace = info['namespace']
+            node_label = self.NODE_LABEL_MAP.get(namespace, 'GOTerm')
+
             properties = {
                 'go_id': go_id,
-                'namespace': info['namespace'],
+                'namespace': namespace,
                 'source_database': 'GeneOntology',
             }
 
-            yield (go_id, 'BiologicalProcess', properties)
+            yield (go_id, node_label, properties)
 
     def get_edges(self) -> Generator[tuple, None, None]:
         """

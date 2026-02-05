@@ -17,7 +17,13 @@ import networkx as nx
 
 from .actor import ActorAgent
 from .actor.strategy import compute_strategy_distance
-from .generator import extract_subgraph, TextGenerator, MockTextGenerator
+from .generator import (
+    extract_subgraph,
+    extract_subgraph_with_scoring,
+    get_neighbor_analysis_for_actor,
+    TextGenerator,
+    MockTextGenerator,
+)
 from .encoder import GeneEncoder
 from .evaluator import TaskEvaluator
 from .utils import load_kg, get_all_genes
@@ -32,14 +38,20 @@ logger = logging.getLogger(__name__)
 
 # Available downstream tasks
 AVAILABLE_TASKS = [
-    'ppi',                              # PPI Prediction
-    'genetype',                         # Gene Type Classification
-    'ggi',                              # Gene-Gene Interaction
-    'cell',                             # Cell Type Classification
-    'geneattribute_dosage_sensitivity', # Dosage Sensitivity
-    'geneattribute_lys4_only',          # H3K4me1 Methylation
-    'geneattribute_no_methylation',     # No Methylation
-    'geneattribute_bivalent',           # Bivalent Chromatin
+    'ppi',                                      # PPI Prediction
+    'genetype',                                 # Gene Type Classification
+    'ggi',                                      # Gene-Gene Interaction
+    'cell',                                     # Cell Type Classification
+    'geneattribute_dosage_sensitivity',         # Dosage Sensitivity
+    'geneattribute_lys4_only',                  # H3K4me1 Methylation
+    'geneattribute_no_methylation',             # No Methylation
+    'geneattribute_bivalent',                   # Bivalent Chromatin
+    # GenePT benchmark cross-category tasks
+    'geneattribute_bivalent_vs_no_methylation', # Bivalent vs Non-methylated
+    'geneattribute_bivalent_vs_lys4_only',      # Bivalent vs Lys4-only
+    'geneattribute_tf_range',                   # TF Range
+    # Perturbation prediction (GenePert)
+    'perturbation',                             # Gene Perturbation Prediction
 ]
 
 
@@ -72,14 +84,21 @@ class SIGRFramework:
         task_name: str,
         log_dir: str = "logs",
         results_dir: str = "results",
-        use_cross_validation: bool = False,
+        use_cross_validation: bool = True,
         n_folds: int = 5,
+        use_multiple_classifiers: bool = True,
         max_workers: int = 8,
         enable_adaptive_reward: bool = False,
         enable_self_critique: bool = True,
         enable_consistency_check: bool = True,
         enable_cot_reasoning: bool = True,
         enable_scientist_mode: bool = True,  # 新增：启用科学家模式
+        enable_neighbor_selection: bool = False,  # 新增：启用邻居选择
+        # Encoder configuration
+        encoder_type: str = 'local',
+        api_base: str = 'https://yunwu.ai/v1',
+        api_key: Optional[str] = None,
+        embedding_model: str = 'text-embedding-ada-002',
     ):
         """
         Initialize the SIGR framework.
@@ -90,14 +109,20 @@ class SIGRFramework:
             task_name: Name of the downstream task
             log_dir: Directory for training logs
             results_dir: Directory for results and strategies
-            use_cross_validation: Whether to use cross-validation
+            use_cross_validation: Whether to use 5-fold cross-validation (default: True)
             n_folds: Number of folds for cross-validation
+            use_multiple_classifiers: Whether to use both LR and RF classifiers (default: True)
             max_workers: Maximum number of concurrent LLM requests
             enable_adaptive_reward: Enable adaptive reward weight adjustment
             enable_self_critique: Enable Actor self-critique (default: True)
             enable_consistency_check: Enable strategy consistency check (default: True)
             enable_cot_reasoning: Enable Chain-of-Thought reasoning (default: True)
             enable_scientist_mode: Enable scientist discovery paradigm (default: True)
+            enable_neighbor_selection: Enable neighbor scoring and selection (default: False)
+            encoder_type: Encoder mode - 'local' (SentenceTransformer) or 'api' (OpenAI API)
+            api_base: API base URL for embedding API (for encoder_type='api')
+            api_key: API key for embedding API (falls back to OPENAI_API_KEY)
+            embedding_model: Embedding model name (for encoder_type='api')
         """
         # Validate task name
         if task_name not in AVAILABLE_TASKS:
@@ -111,6 +136,8 @@ class SIGRFramework:
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self.max_workers = max_workers
         self.enable_adaptive_reward = enable_adaptive_reward
+        self.use_multiple_classifiers = use_multiple_classifiers
+        self.enable_neighbor_selection = enable_neighbor_selection
 
         # Load knowledge graph
         logger.info(f"Loading knowledge graph from {kg_path}")
@@ -133,12 +160,18 @@ class SIGRFramework:
             enable_scientist_mode=enable_scientist_mode  # 新增
         )
         self.generator = TextGenerator(llm_client)
-        self.encoder = GeneEncoder()
+        self.encoder = GeneEncoder(
+            encoder_type=encoder_type,
+            api_base=api_base,
+            api_key=api_key,
+            api_model=embedding_model
+        )
         self.evaluator = TaskEvaluator(
             task_name,
             self.kg,
             use_cross_validation=use_cross_validation,
             n_folds=n_folds,
+            use_multiple_classifiers=use_multiple_classifiers,
             enable_adaptive_reward=enable_adaptive_reward
         )
         self.logger = SIGRLogger(task_name, log_dir)
@@ -730,12 +763,14 @@ class SIGRFramework:
             })
 
         # Save iteration summary
-        self.logger.save_iteration_summary({
-            'reward': reward,
-            'metrics': metrics,
-            'num_genes': len(eval_genes),
-            'num_embeddings': len(embeddings)
-        })
+        self.logger.save_iteration_summary(
+            additional_info={
+                'reward': reward,
+                'num_genes': len(eval_genes),
+                'num_embeddings': len(embeddings)
+            },
+            metrics=metrics
+        )
 
         return reward, metrics
 
@@ -851,16 +886,37 @@ CONSTRAINTS:
         # Phase 1: Generate all descriptions using LLM (multi-threaded)
         logger.info(f"Phase 1: Generating descriptions for {len(gene_ids)} genes (workers={self.max_workers})...")
 
+        # Prepare task genes set for neighbor selection
+        task_genes_set = set(self.task_genes) if self.task_genes else set()
+
         def generate_single_description(gene_id: str) -> tuple:
             """Generate description for a single gene."""
             try:
                 # Extract subgraph using strategy with dynamic edge weights
-                subgraph = extract_subgraph(
-                    gene_id=gene_id,
-                    strategy=extraction_strategy,
-                    kg=self.kg,
-                    edge_weights=edge_weights
-                )
+                # Use neighbor selection if enabled
+                if self.enable_neighbor_selection:
+                    subgraph, scoring_info = extract_subgraph_with_scoring(
+                        gene_id=gene_id,
+                        strategy=extraction_strategy,
+                        kg=self.kg,
+                        edge_weights=edge_weights,
+                        task_genes=task_genes_set,
+                        memory=self.memory,
+                        enable_neighbor_selection=True,
+                    )
+                    if scoring_info and scoring_info.get('filtered'):
+                        logger.debug(
+                            f"Neighbor selection for {gene_id}: "
+                            f"kept {scoring_info.get('selected_count', 0)}, "
+                            f"removed {scoring_info.get('excluded_count', 0)}"
+                        )
+                else:
+                    subgraph = extract_subgraph(
+                        gene_id=gene_id,
+                        strategy=extraction_strategy,
+                        kg=self.kg,
+                        edge_weights=edge_weights
+                    )
 
                 # Generate description with strategy parameters
                 # Return both filtered and original
@@ -1264,6 +1320,30 @@ def get_task_info(task_name: str) -> Dict[str, str]:
             'metric': 'auc',
             'data': 'data/downstreams/geneattribute/'
         },
+        'geneattribute_bivalent_vs_no_methylation': {
+            'name': 'Bivalent vs Non-methylated',
+            'description': 'Bivalent vs non-methylated genes (GenePT benchmark)',
+            'metric': 'auc',
+            'data': 'data/downstreams/geneattribute/'
+        },
+        'geneattribute_bivalent_vs_lys4_only': {
+            'name': 'Bivalent vs Lys4-only',
+            'description': 'Bivalent vs H3K4me1-only genes (GenePT benchmark)',
+            'metric': 'auc',
+            'data': 'data/downstreams/geneattribute/'
+        },
+        'geneattribute_tf_range': {
+            'name': 'TF Range',
+            'description': 'TF range classification (dosage sensitive TFs)',
+            'metric': 'auc',
+            'data': 'data/downstreams/geneattribute/'
+        },
+        'perturbation': {
+            'name': 'Gene Perturbation Prediction',
+            'description': 'Predict expression changes after gene knockout (GenePert)',
+            'metric': 'delta_correlation',
+            'data': 'data/downstreams/genepert/'
+        },
     }
     return task_info.get(task_name, {'name': task_name, 'description': 'Unknown task'})
 
@@ -1286,8 +1366,9 @@ def run_training(
     fast_model: str = "gpt-4o-mini",
     strong_model: str = "gemini-3-pro-preview",
     # Evaluation options
-    use_cross_validation: bool = False,
+    use_cross_validation: bool = True,
     n_folds: int = 5,
+    use_multiple_classifiers: bool = True,
     # Concurrency
     max_workers: int = 8,
     # Checkpoint options
@@ -1298,7 +1379,12 @@ def run_training(
     # Self-verification options (LLM self-critique, Constitutional AI patterns)
     enable_self_critique: bool = True,
     enable_consistency_check: bool = True,
-    enable_cot_reasoning: bool = True
+    enable_cot_reasoning: bool = True,
+    # Neighbor selection
+    enable_neighbor_selection: bool = False,
+    # Encoder configuration
+    encoder_type: str = 'local',
+    embedding_model: str = 'text-embedding-ada-002'
 ):
     """
     Convenience function to run SIGR training.
@@ -1318,8 +1404,9 @@ def run_training(
         use_dual_model: Use dual model architecture (recommended)
         fast_model: Model for generation tasks (dual model mode)
         strong_model: Model for reflection/reasoning (dual model mode)
-        use_cross_validation: Whether to use cross-validation
+        use_cross_validation: Whether to use 5-fold cross-validation (default: True)
         n_folds: Number of folds for cross-validation
+        use_multiple_classifiers: Whether to use both LR and RF classifiers (default: True)
         max_workers: Maximum concurrent LLM requests
         checkpoint_interval: Save checkpoint every N iterations (0 to disable)
         resume_from: Path to checkpoint file to resume from
@@ -1370,11 +1457,18 @@ def run_training(
         results_dir=results_dir,
         use_cross_validation=use_cross_validation,
         n_folds=n_folds,
+        use_multiple_classifiers=use_multiple_classifiers,
         max_workers=max_workers,
         enable_adaptive_reward=enable_adaptive_reward,
         enable_self_critique=enable_self_critique,
         enable_consistency_check=enable_consistency_check,
-        enable_cot_reasoning=enable_cot_reasoning
+        enable_cot_reasoning=enable_cot_reasoning,
+        enable_neighbor_selection=enable_neighbor_selection,
+        # Encoder configuration
+        encoder_type=encoder_type,
+        api_base=api_base,
+        api_key=api_key,
+        embedding_model=embedding_model
     )
 
     # Use checkpoint-aware training if checkpoint/resume specified

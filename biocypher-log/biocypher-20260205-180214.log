@@ -1,0 +1,78 @@
+2026-02-05 18:02:14,929	INFO	module:_logger
+This is BioCypher v0.12.5.
+2026-02-05 18:02:14,930	INFO	module:_logger
+Logging into `biocypher-log/biocypher-20260205-180214.log`.
+2026-02-05 18:02:14,930	DEBUG	module:_create
+Loading module biocypher._create.
+2026-02-05 18:02:14,931	DEBUG	module:_deduplicate
+Loading module biocypher._deduplicate.
+2026-02-05 18:02:14,989	DEBUG	module:_misc
+Loading module biocypher._misc.
+2026-02-05 18:02:14,989	DEBUG	module:_get
+Loading module biocypher._get.
+2026-02-05 18:02:14,989	DEBUG	module:_mapping
+Loading module biocypher._mapping.
+2026-02-05 18:02:15,009	DEBUG	module:_ontology
+Loading module biocypher._ontology.
+2026-02-05 18:02:15,011	DEBUG	module:_translate
+Loading module biocypher._translate.
+2026-02-05 18:02:15,012	DEBUG	module:_get_connector
+Loading module biocypher.output.connect._get_connector.
+2026-02-05 18:02:15,194	DEBUG	module:_get_in_memory_kg
+Loading module biocypher.output.in_memory._get_in_memory_kg.
+2026-02-05 18:02:15,198	DEBUG	module:_get_writer
+Loading module biocypher.output.write._get_writer.
+2026-02-05 18:02:15,198	DEBUG	module:_core
+Loading module biocypher._core.
+2026-02-05 18:02:15,203	INFO	module:_core
+Running BioCypher with schema configuration from /Users/xianull/Documents/Project/SIGR/kg_builder/config/schema_config.yaml.
+2026-02-05 18:02:16,182	INFO	module:_ontology
+Loading ontologies...
+2026-02-05 18:02:16,182	INFO	module:_ontology
+Instantiating OntologyAdapter class for https://github.com/biolink/biolink-model/raw/v3.2.1/biolink-model.owl.ttl.
+2026-02-05 18:02:17,890	DEBUG	module:_translate
+Translating nodes to BioCypher
+2026-02-05 18:02:18,015	DEBUG	module:_translate
+Finished translating nodes to BioCypher.
+2026-02-05 18:02:27,609	DEBUG	module:_translate
+Translating edges to BioCypher
+2026-02-05 18:02:28,253	DEBUG	module:_translate
+Finished translating edges to BioCypher.
+2026-02-05 18:02:28,987	DEBUG	module:_translate
+Translating edges to BioCypher
+2026-02-05 18:02:28,988	WARNING	module:_deduplicate
+Duplicate edge type regulates found. 
+2026-02-05 18:02:29,002	DEBUG	module:_translate
+Finished translating edges to BioCypher.
+2026-02-05 18:02:29,754	DEBUG	module:_translate
+Translating nodes to BioCypher
+2026-02-05 18:02:29,786	DEBUG	module:_translate
+Finished translating nodes to BioCypher.
+2026-02-05 18:02:30,276	DEBUG	module:_translate
+Translating edges to BioCypher
+2026-02-05 18:02:31,251	DEBUG	module:_translate
+Finished translating edges to BioCypher.
+2026-02-05 18:02:35,233	DEBUG	module:_translate
+Translating nodes to BioCypher
+2026-02-05 18:02:35,249	DEBUG	module:_translate
+Finished translating nodes to BioCypher.
+2026-02-05 18:02:35,480	DEBUG	module:_translate
+Translating edges to BioCypher
+2026-02-05 18:02:36,156	DEBUG	module:_translate
+Finished translating edges to BioCypher.
+2026-02-05 18:02:41,715	DEBUG	module:_translate
+Translating nodes to BioCypher
+2026-02-05 18:02:41,718	DEBUG	module:_translate
+Finished translating nodes to BioCypher.
+2026-02-05 18:02:41,741	DEBUG	module:_translate
+Translating edges to BioCypher
+2026-02-05 18:02:41,847	DEBUG	module:_translate
+Finished translating edges to BioCypher.
+2026-02-05 18:02:42,733	DEBUG	module:_translate
+Translating nodes to BioCypher
+2026-02-05 18:02:42,739	DEBUG	module:_translate
+Finished translating nodes to BioCypher.
+2026-02-05 18:02:42,756	DEBUG	module:_translate
+Translating edges to BioCypher
+2026-02-05 18:02:42,933	DEBUG	module:_translate
+Finished translating edges to BioCypher.

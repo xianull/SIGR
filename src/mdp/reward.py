@@ -695,18 +695,19 @@ class RewardComputer:
         is_first_iteration = (history is None or len(history) == 0)
 
         # 获取或初始化 best_metric
-        if self._best_metric is None:
-            if is_first_iteration:
+        # 注意：由于 compute() 可能已经更新了 _best_metric，这里需要特殊处理
+        if is_first_iteration:
+            # 首次迭代：如果还没设置，使用当前指标作为基准
+            if self._best_metric is None:
                 self._best_metric = current_metric
-            elif history:
-                self._best_metric = max(history)
-            else:
-                # 逻辑矛盾：不是第一次迭代但没有历史
-                logger.warning(
-                    "Inconsistent state: not first iteration but no history. "
-                    "Using current_metric as baseline."
-                )
-                self._best_metric = current_metric
+        else:
+            # 非首次迭代：始终使用 history 中的最大值作为比较基准
+            # 这避免了 compute() 先调用时 _best_metric 被错误更新的问题
+            if history:
+                history_best = max(history)
+                # 如果 _best_metric 被 compute() 更新到当前值，需要回退到 history 最大值
+                if self._best_metric is None or self._best_metric == current_metric:
+                    self._best_metric = history_best
 
         # 计算指标差异
         metric_delta = current_metric - self._best_metric

@@ -148,12 +148,12 @@ class SIGRLogger:
         with open(desc_file, 'w') as f:
             f.write(description)
 
-    def log_evaluation(self, metrics: Dict[str, float], reward: float):
+    def log_evaluation(self, metrics: Dict[str, Any], reward: float):
         """
         Log evaluation results.
 
         Args:
-            metrics: Dictionary of evaluation metrics
+            metrics: Dictionary of evaluation metrics (single or multi-classifier format)
             reward: Computed reward value
         """
         if self.iter_dir is None:
@@ -167,7 +167,16 @@ class SIGRLogger:
                 'timestamp': datetime.now().isoformat()
             }, f, indent=2)
 
-        logger.info(f"Iteration {self.current_iteration}: reward = {reward:.4f}")
+        # Log multi-classifier results if available
+        if 'combined' in metrics:
+            logger.info(
+                f"Iteration {self.current_iteration}: reward = {reward:.4f}, "
+                f"LR_AUC = {metrics.get('logistic', {}).get('auc', 0):.4f}, "
+                f"RF_AUC = {metrics.get('random_forest', {}).get('auc', 0):.4f}, "
+                f"Avg_AUC = {metrics.get('combined', {}).get('auc', 0):.4f}"
+            )
+        else:
+            logger.info(f"Iteration {self.current_iteration}: reward = {reward:.4f}")
 
     def log_feedback(self, feedback: str):
         """
@@ -239,7 +248,11 @@ class SIGRLogger:
         with open(reward_file, 'w') as f:
             json.dump(reward_info, f, indent=2)
 
-    def save_iteration_summary(self, additional_info: Optional[Dict[str, Any]] = None):
+    def save_iteration_summary(
+        self,
+        additional_info: Optional[Dict[str, Any]] = None,
+        metrics: Optional[Dict[str, Any]] = None
+    ):
         """
         Save summary for this iteration.
 
@@ -247,12 +260,26 @@ class SIGRLogger:
 
         Args:
             additional_info: Optional additional information to include
+            metrics: Optional metrics dict (supports multi-classifier format)
         """
         summary_entry = {
             'iteration': self.current_iteration,
             'task': self.task_name,
             'timestamp': datetime.now().isoformat()
         }
+
+        # Handle multi-classifier metrics format
+        if metrics is not None:
+            if 'combined' in metrics:
+                # Multi-classifier format
+                summary_entry['metrics_lr'] = metrics.get('logistic', {})
+                summary_entry['metrics_rf'] = metrics.get('random_forest', {})
+                summary_entry['metrics_combined'] = metrics.get('combined', {})
+                # Also include combined as the main metrics for compatibility
+                summary_entry['metrics'] = metrics.get('combined', {})
+            else:
+                # Single classifier format
+                summary_entry['metrics'] = metrics
 
         if additional_info:
             summary_entry.update(additional_info)
