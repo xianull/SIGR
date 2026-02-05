@@ -11,6 +11,13 @@ from .formatter import format_subgraph
 from .text_generator import TextGenerator, MockTextGenerator
 from .neighbor_scorer import NeighborScorer, NeighborScore
 from .neighbor_presenter import NeighborPresenter, format_neighbor_analysis_section
+from .neighbor_stats import (
+    NeighborStatsCollector,
+    IterationNeighborStats,
+    EdgeTypeStats,
+    HighFrequencyNeighbor,
+    format_neighbor_stats_for_actor,
+)
 
 __all__ = [
     # Subgraph extraction
@@ -29,4 +36,10 @@ __all__ = [
     "NeighborScore",
     "NeighborPresenter",
     "format_neighbor_analysis_section",
+    # Neighbor statistics
+    "NeighborStatsCollector",
+    "IterationNeighborStats",
+    "EdgeTypeStats",
+    "HighFrequencyNeighbor",
+    "format_neighbor_stats_for_actor",
 ]

@@ -23,7 +23,8 @@
       "WebFetch(domain:www.biorxiv.org)",
       "Bash(cat:*)",
       "WebFetch(domain:yunwu.apifox.cn)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(wget:*)"
     ]
   }
 }

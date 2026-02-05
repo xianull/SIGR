@@ -442,7 +442,7 @@ class SIGRFramework:
         logger.info(f"Using fixed evaluation set: {len(eval_genes)} genes")
 
         # Generate embeddings for sampled genes (uses LLM)
-        embeddings, descriptions, raw_descriptions = self._generate_embeddings(
+        embeddings, descriptions, raw_descriptions, neighbor_stats = self._generate_embeddings(
             eval_genes, strategy
         )
 
@@ -451,6 +451,9 @@ class SIGRFramework:
             self._raw_descriptions.update(raw_descriptions)
         else:
             self._raw_descriptions = raw_descriptions
+
+        # Store neighbor stats for use in _evaluate_and_update
+        self._current_neighbor_stats = neighbor_stats
 
         # Use common evaluation logic
         return self._evaluate_and_update(
@@ -702,16 +705,19 @@ class SIGRFramework:
         # Get edge effects for Actor to see historical edge type effectiveness
         task_edge_effects = self.memory.data.get("task_edge_effects", {}).get(self.task_name, {})
 
+        # Get neighbor stats if available (stored by _train_one_iteration)
+        neighbor_stats = getattr(self, '_current_neighbor_stats', None)
+
         # Actor reflects and updates policy
-        # 科学家模式使用新的 update_policy_scientist 方法
+        # 科学家模式使用 Bio-CoT 方法进行生物学推理
         if self.enable_scientist_mode and reward_signal is not None:
-            logger.info(f"Using scientist mode with thinking mode based on state: {reward_signal.state.value}")
-            self.actor.update_policy_scientist(
+            logger.info(f"Using Bio-CoT mode with thinking mode based on state: {reward_signal.state.value}")
+            self.actor.update_policy_biologist(
                 reward_signal=reward_signal,
                 strategy_dict=strategy,
                 trend_analysis=trend_analysis,
-                kgbook_suggestions=memory_suggestions,
-                edge_effects=task_edge_effects
+                edge_effects=task_edge_effects,
+                neighbor_stats=neighbor_stats,
             )
         else:
             # Legacy mode
@@ -851,7 +857,7 @@ CONSTRAINTS:
         self,
         gene_ids: List[str],
         strategy: Dict[str, Any]
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, str], Dict[str, str]]:
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, str], Dict[str, str], Optional[Any]]:
         """
         Generate embeddings for a list of genes.
 
@@ -864,10 +870,13 @@ CONSTRAINTS:
             strategy: Current strategy configuration
 
         Returns:
-            Tuple of (embeddings dict, descriptions dict)
+            Tuple of (embeddings dict, descriptions dict, raw_descriptions dict, neighbor_stats)
             descriptions dict contains filtered descriptions
             Raw descriptions are saved separately
+            neighbor_stats contains iteration-level neighbor statistics (or None)
         """
+        from .generator import NeighborStatsCollector, format_neighbor_stats_for_actor
+
         descriptions = {}  # Filtered descriptions (for encoding)
         raw_descriptions = {}  # Original descriptions (for analysis)
 
@@ -889,11 +898,20 @@ CONSTRAINTS:
         # Prepare task genes set for neighbor selection
         task_genes_set = set(self.task_genes) if self.task_genes else set()
 
+        # Initialize neighbor stats collector
+        stats_collector = NeighborStatsCollector(task_genes=task_genes_set)
+
+        # Thread-safe collection for neighbor data
+        import threading
+        neighbor_data_lock = threading.Lock()
+        neighbor_data_list = []
+
         def generate_single_description(gene_id: str) -> tuple:
             """Generate description for a single gene."""
             try:
                 # Extract subgraph using strategy with dynamic edge weights
                 # Use neighbor selection if enabled
+                scoring_info = None
                 if self.enable_neighbor_selection:
                     subgraph, scoring_info = extract_subgraph_with_scoring(
                         gene_id=gene_id,
@@ -917,6 +935,25 @@ CONSTRAINTS:
                         kg=self.kg,
                         edge_weights=edge_weights
                     )
+
+                # Collect neighbor data for stats (extract from subgraph)
+                neighbors_for_stats = []
+                scores_for_stats = {}
+                for _, neighbor, data in subgraph.out_edges(gene_id, data=True):
+                    edge_type = data.get('edge_type', 'unknown')
+                    neighbors_for_stats.append((neighbor, edge_type, 'out'))
+
+                # If we have scoring info, extract scores
+                if scoring_info and 'scores' in scoring_info:
+                    scores_for_stats = scoring_info['scores']
+
+                # Thread-safe append
+                with neighbor_data_lock:
+                    neighbor_data_list.append({
+                        'gene_id': gene_id,
+                        'neighbors': neighbors_for_stats,
+                        'scores': scores_for_stats,
+                    })
 
                 # Generate description with strategy parameters
                 # Return both filtered and original
@@ -962,9 +999,23 @@ CONSTRAINTS:
                     gene_id = futures.get(future, "unknown")
                     logger.error(f"Unexpected error for gene {gene_id}: {e}")
 
+        # Aggregate neighbor statistics
+        for data in neighbor_data_list:
+            stats_collector.record_gene_neighbors(
+                gene_id=data['gene_id'],
+                neighbors=data['neighbors'],
+                scores=data['scores'],
+            )
+
+        neighbor_stats = stats_collector.get_stats()
+        logger.info(
+            f"Neighbor stats: {neighbor_stats.total_neighbors} total neighbors, "
+            f"{neighbor_stats.high_relevance_count} high / {neighbor_stats.low_relevance_count} low relevance"
+        )
+
         if not descriptions:
             logger.warning("No descriptions generated")
-            return {}, {}, {}
+            return {}, {}, {}, neighbor_stats
 
         # Phase 2: Batch encode all descriptions (using filtered descriptions)
         logger.info(f"Phase 2: Encoding {len(descriptions)} descriptions...")
@@ -975,7 +1026,7 @@ CONSTRAINTS:
         )
 
         logger.info(f"Generated {len(embeddings)} embeddings")
-        return embeddings, descriptions, raw_descriptions
+        return embeddings, descriptions, raw_descriptions, neighbor_stats
 
     def _save_best_strategy(self, strategy: Dict[str, Any], reward: float):
         """Save best strategy to results directory."""

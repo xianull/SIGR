@@ -33,6 +33,7 @@ __all__ = [
     'get_bio_cot_prompt',
     'format_strategy_summary',
     'get_neighbor_analysis_prompt_section',
+    'format_edge_weights_for_actor',
 ]
 
 
@@ -1042,6 +1043,40 @@ You are in **ANALYZE-AND-PIVOT** mode (exploration failed).
 - Avoid repeating the same mistake
 - Medium-level changes recommended (20-30% parameter difference)
 - Focus on why the hypothesis failed before proposing new one
+
+**CONSIDER PRUNING**: If edge type ablation history shows consistent negative contributions
+for certain edge types, consider entering PRUNE mode by:
+- Removing edge types classified as "LIKELY NOISE"
+- Reducing max_neighbors if context has grown without improvement
+""",
+    "PRUNE": """
+You are in **PRUNE** mode (detected noise accumulation).
+Your recent strategies have been adding context without improving performance.
+This indicates potential noise accumulation that is diluting the signal.
+
+**MANDATORY ACTIONS:**
+1. REDUCE max_neighbors by at least 20% from current value
+2. REMOVE at least one edge type that has negative marginal contribution
+   - Check the "EDGE TYPE ABLATION HISTORY" section for guidance
+   - Prioritize removing edge types classified as "LIKELY NOISE"
+3. DO NOT add any new edge types in this iteration
+
+**DIAGNOSTIC CHECKLIST:**
+- Which edge types have avg_delta_when_added < 0? -> Remove these first
+- Which edge types have avg_delta_when_removed > 0? -> These are candidates for removal
+- Is current max_neighbors > 1.5x the value at best metric? -> Reduce aggressively
+
+**Example PRUNE hypothesis:**
+"I hypothesize that removing Reactome edges and reducing max_neighbors from 100 to 60
+will improve performance because Reactome has shown negative marginal contribution
+(-0.018 when added, +0.012 when removed) and the increased context is diluting
+task-specific signal."
+
+**CONSTRAINTS:**
+- max_neighbors must DECREASE by at least 20%
+- Must REMOVE at least one edge type from current strategy
+- Changes should be justified by ablation history data
+- Focus on signal-to-noise ratio improvement, not exploration
 """
 }
 
@@ -1383,6 +1418,8 @@ State the experimental facts objectively:
 - Change: {delta} ({experiment_state})
 - Strategy used: {strategy_summary}
 
+{current_neighbor_stats}
+
 ### STEP 2: BIOLOGICAL DIAGNOSIS (Why did this happen?)
 Analyze from a BIOLOGICAL perspective. Think about:
 {task_diagnosis_questions}
@@ -1391,6 +1428,15 @@ Key questions:
 - What biological mechanism might explain this outcome?
 - How does the knowledge graph structure relate to the task?
 - What signal-to-noise considerations apply?
+
+{edge_contribution_history}
+
+**MANDATORY NOISE ANALYSIS** (if edge contribution history is available):
+Before proposing changes, you MUST analyze:
+1. Which edge types might be introducing noise based on the ablation history above?
+2. Is the current context size (max_neighbors) appropriate for the signal density?
+3. Are high-degree hub genes diluting task-specific signal?
+4. **Review the CURRENT ITERATION NEIGHBOR STATISTICS above** - are there edge types with high low-relevance ratios?
 
 ### STEP 3: HYPOTHESIS FORMULATION (What should we try?)
 Based on your diagnosis, propose a TESTABLE biological hypothesis.
@@ -1409,6 +1455,8 @@ Each parameter choice MUST logically follow from your hypothesis.
 Explain the connection:
 - Hypothesis: "cell identity is marker-defined" → edge_types=['CellMarker', 'GO'] (because markers directly define identity)
 - Hypothesis: "fewer genes define cell type" → max_neighbors=20 (because cell identity is sparse, not dense)
+
+{edge_weights_info}
 
 Available parameters:
 - edge_types: PPI, GO, HPO, TRRUST, CellMarker, Reactome
@@ -1449,6 +1497,7 @@ Provide your response as a JSON object. The structure MUST match exactly:
         "state": "<BREAKTHROUGH|EXPLORATION_FAILURE|STAGNATION>"
     }}}},
     "biological_diagnosis": "<Your biological analysis of why this happened>",
+    "noise_analysis": "<Your analysis of potential noise sources based on edge contribution history>",
     "hypothesis": {{{{
         "statement": "<I hypothesize that...>",
         "biological_basis": "<The biological mechanism is...>",
@@ -1482,6 +1531,9 @@ def get_bio_cot_prompt(
     hypothesis_ledger_summary: str,
     failure_patterns: str = "",
     mode_constraints: str = "",
+    edge_contribution_history: str = "",
+    current_neighbor_stats: str = "",
+    edge_weights_info: str = "",
 ) -> str:
     """
     生成 Bio-CoT (Biological Chain of Thought) Prompt
@@ -1499,6 +1551,9 @@ def get_bio_cot_prompt(
         hypothesis_ledger_summary: 假设账本摘要
         failure_patterns: 失败模式分析
         mode_constraints: 思维模式约束
+        edge_contribution_history: 边类型贡献历史摘要 (来自 HypothesisLedger)
+        current_neighbor_stats: 当前迭代的邻居统计信息 (来自 NeighborStatsCollector)
+        edge_weights_info: 边类型权重信息 (来自 Memory/KGBOOK)
 
     Returns:
         str: 格式化的 Bio-CoT prompt
@@ -1529,6 +1584,9 @@ def get_bio_cot_prompt(
         hypothesis_ledger_summary=hypothesis_ledger_summary,
         failure_patterns=failure_patterns,
         mode_constraints=mode_constraints,
+        edge_contribution_history=edge_contribution_history,
+        current_neighbor_stats=current_neighbor_stats,
+        edge_weights_info=edge_weights_info,
     )
 
 
@@ -1552,6 +1610,75 @@ def format_strategy_summary(strategy: Dict) -> str:
         f"edge_types={edge_types}, max_neighbors={max_neighbors}, "
         f"sampling={sampling}, max_hops={max_hops}, description_length={desc_length}"
     )
+
+
+def format_edge_weights_for_actor(
+    edge_weights: Dict[str, float],
+    edge_effects: Optional[Dict[str, Dict]] = None
+) -> str:
+    """
+    格式化边类型权重信息供 Actor 决策
+
+    这些权重反映了各边类型在当前任务上的历史效果，
+    帮助 Actor 知情地选择边类型组合。
+
+    Args:
+        edge_weights: 边类型 -> 权重 (0-1) 的映射
+        edge_effects: 边类型 -> 效果统计 的映射 (可选)
+            包含 'ema_effect', 'usage_count', 'success_rate' 等字段
+
+    Returns:
+        str: 格式化的边类型权重信息
+    """
+    if not edge_weights:
+        return ""
+
+    lines = ["## EDGE TYPE EFFECTIVENESS (for this task)\n"]
+    lines.append("Historical performance ranked by effectiveness:\n")
+
+    # 按权重排序
+    sorted_edges = sorted(edge_weights.items(), key=lambda x: -x[1])
+
+    for edge_type, weight in sorted_edges:
+        effect_info = ""
+        usage_info = ""
+
+        if edge_effects and edge_type in edge_effects:
+            effect = edge_effects[edge_type]
+            ema = effect.get('ema_effect', 0)
+            usage = effect.get('usage_count', 0)
+            success = effect.get('success_rate', 0)
+
+            if ema != 0:
+                effect_info = f", ema_effect={ema:+.4f}"
+            if usage > 0:
+                usage_info = f", used {usage}x"
+                if success > 0:
+                    usage_info += f" ({success*100:.0f}% success)"
+
+        # 生成推荐标签
+        recommendation = ""
+        if weight >= 0.8:
+            recommendation = " <- **RECOMMENDED**"
+        elif weight >= 0.6:
+            recommendation = " <- useful"
+        elif weight <= 0.3:
+            recommendation = " <- **discouraged** (may add noise)"
+        elif weight <= 0.5:
+            recommendation = " <- neutral"
+
+        lines.append(
+            f"- **{edge_type}**: weight={weight:.2f}{effect_info}{usage_info}{recommendation}"
+        )
+
+    lines.append("")
+    lines.append("**Decision guidance:**")
+    lines.append("- Prioritize edge types with weight >= 0.8 (proven effective)")
+    lines.append("- Consider removing edge types with weight <= 0.3 (likely noise)")
+    lines.append("- If current AUC is stagnating, try removing lowest-weight edges")
+    lines.append("")
+
+    return "\n".join(lines)
 
 
 # =============================================================================

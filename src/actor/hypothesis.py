@@ -21,9 +21,103 @@ HypothesisLedger 追踪所有假设的生命周期：
 import logging
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Set
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# 边类型贡献追踪 (Edge Type Contribution Tracking)
+# =============================================================================
+
+@dataclass
+class EdgeTypeContribution:
+    """
+    追踪每种边类型对指标的边际贡献 (Marginal Contribution Tracking)
+
+    用于实现"消融实验"逻辑：
+    - 记录添加/移除某边类型时指标的变化
+    - 帮助 Actor 识别哪些边类型是噪声
+
+    Attributes:
+        edge_type: 边类型名称 (e.g., "PPI", "HPO", "Reactome")
+        times_added: 该边类型被添加的次数
+        times_removed: 该边类型被移除的次数
+        avg_delta_when_added: 添加时的平均指标变化 (EMA)
+        avg_delta_when_removed: 移除时的平均指标变化 (EMA)
+        last_metric_with: 最近一次包含该边类型时的指标
+        last_metric_without: 最近一次不包含该边类型时的指标
+    """
+    edge_type: str
+    times_added: int = 0
+    times_removed: int = 0
+    avg_delta_when_added: float = 0.0
+    avg_delta_when_removed: float = 0.0
+    last_metric_with: float = 0.0
+    last_metric_without: float = 0.0
+
+    # EMA 衰减系数
+    EMA_DECAY: float = 0.7
+
+    def record_addition(self, metric_delta: float, current_metric: float):
+        """记录边类型被添加时的效果"""
+        self.times_added += 1
+        if self.times_added == 1:
+            self.avg_delta_when_added = metric_delta
+        else:
+            self.avg_delta_when_added = (
+                self.EMA_DECAY * self.avg_delta_when_added +
+                (1 - self.EMA_DECAY) * metric_delta
+            )
+        self.last_metric_with = current_metric
+
+    def record_removal(self, metric_delta: float, current_metric: float):
+        """记录边类型被移除时的效果"""
+        self.times_removed += 1
+        if self.times_removed == 1:
+            self.avg_delta_when_removed = metric_delta
+        else:
+            self.avg_delta_when_removed = (
+                self.EMA_DECAY * self.avg_delta_when_removed +
+                (1 - self.EMA_DECAY) * metric_delta
+            )
+        self.last_metric_without = current_metric
+
+    def get_net_contribution(self) -> float:
+        """
+        计算净贡献：添加时的效果 - 移除时的效果
+
+        正值 = 添加有益，移除有害 = BENEFICIAL
+        负值 = 添加有害，移除有益 = NOISE
+        接近零 = NEUTRAL
+        """
+        return self.avg_delta_when_added - self.avg_delta_when_removed
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典格式"""
+        return {
+            'edge_type': self.edge_type,
+            'times_added': self.times_added,
+            'times_removed': self.times_removed,
+            'avg_delta_when_added': self.avg_delta_when_added,
+            'avg_delta_when_removed': self.avg_delta_when_removed,
+            'last_metric_with': self.last_metric_with,
+            'last_metric_without': self.last_metric_without,
+            'net_contribution': self.get_net_contribution(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'EdgeTypeContribution':
+        """从字典创建"""
+        return cls(
+            edge_type=data['edge_type'],
+            times_added=data.get('times_added', 0),
+            times_removed=data.get('times_removed', 0),
+            avg_delta_when_added=data.get('avg_delta_when_added', 0.0),
+            avg_delta_when_removed=data.get('avg_delta_when_removed', 0.0),
+            last_metric_with=data.get('last_metric_with', 0.0),
+            last_metric_without=data.get('last_metric_without', 0.0),
+        )
 
 
 class HypothesisStatus(str, Enum):
@@ -164,6 +258,12 @@ class HypothesisLedger:
         self.hypotheses: Dict[str, Hypothesis] = {}
         self._counter: int = 0
         self._current_hypothesis_id: Optional[str] = None  # 当前活跃假设的 ID
+
+        # 边类型贡献追踪 (Edge Type Contribution Tracking)
+        self.edge_contributions: Dict[str, EdgeTypeContribution] = {}
+        self._prev_edge_types: Optional[Set[str]] = None
+        self._prev_metric: Optional[float] = None
+        self._best_metric_strategy_neighbors: Optional[int] = None  # 最佳指标时的 max_neighbors
 
     def propose(
         self,
@@ -434,6 +534,10 @@ class HypothesisLedger:
             'hypotheses': {k: v.to_dict() for k, v in self.hypotheses.items()},
             'counter': self._counter,
             'current_hypothesis_id': self._current_hypothesis_id,
+            'edge_contributions': {k: v.to_dict() for k, v in self.edge_contributions.items()},
+            'prev_edge_types': list(self._prev_edge_types) if self._prev_edge_types else None,
+            'prev_metric': self._prev_metric,
+            'best_metric_strategy_neighbors': self._best_metric_strategy_neighbors,
         }
 
     def load_state(self, state: Dict[str, Any]):
@@ -444,10 +548,240 @@ class HypothesisLedger:
         }
         self._counter = state.get('counter', 0)
         self._current_hypothesis_id = state.get('current_hypothesis_id')
+        # 恢复边类型贡献追踪
+        self.edge_contributions = {
+            k: EdgeTypeContribution.from_dict(v)
+            for k, v in state.get('edge_contributions', {}).items()
+        }
+        prev_et = state.get('prev_edge_types')
+        self._prev_edge_types = set(prev_et) if prev_et else None
+        self._prev_metric = state.get('prev_metric')
+        self._best_metric_strategy_neighbors = state.get('best_metric_strategy_neighbors')
 
     def reset(self):
         """重置账本"""
         self.hypotheses.clear()
         self._counter = 0
         self._current_hypothesis_id = None
+        # 重置边类型贡献追踪
+        self.edge_contributions.clear()
+        self._prev_edge_types = None
+        self._prev_metric = None
+        self._best_metric_strategy_neighbors = None
         logger.info("HypothesisLedger reset")
+
+    # =========================================================================
+    # 边类型贡献追踪方法 (Edge Type Contribution Tracking Methods)
+    # =========================================================================
+
+    def record_edge_contribution(
+        self,
+        current_edge_types: List[str],
+        current_metric: float,
+        iteration: int,
+        max_neighbors: Optional[int] = None,
+    ):
+        """
+        记录边类型变化的边际贡献
+
+        通过比较本次和上次的边类型集合，追踪：
+        - 哪些边类型被添加，以及添加后指标变化
+        - 哪些边类型被移除，以及移除后指标变化
+
+        Args:
+            current_edge_types: 当前使用的边类型列表
+            current_metric: 当前实验的指标值
+            iteration: 当前迭代编号
+            max_neighbors: 当前策略的 max_neighbors 值
+        """
+        curr_set = set(current_edge_types)
+
+        # 首次调用，初始化状态
+        if self._prev_edge_types is None or self._prev_metric is None:
+            self._prev_edge_types = curr_set
+            self._prev_metric = current_metric
+            if max_neighbors:
+                self._best_metric_strategy_neighbors = max_neighbors
+            logger.debug(f"Edge contribution tracking initialized: edges={curr_set}")
+            return
+
+        # 计算指标变化
+        metric_delta = current_metric - self._prev_metric
+
+        # 识别添加和移除的边类型
+        added_edges = curr_set - self._prev_edge_types
+        removed_edges = self._prev_edge_types - curr_set
+
+        # 记录添加的边类型效果
+        for edge_type in added_edges:
+            if edge_type not in self.edge_contributions:
+                self.edge_contributions[edge_type] = EdgeTypeContribution(edge_type=edge_type)
+            self.edge_contributions[edge_type].record_addition(metric_delta, current_metric)
+            logger.debug(
+                f"Edge {edge_type} added: delta={metric_delta:+.4f}, "
+                f"avg_when_added={self.edge_contributions[edge_type].avg_delta_when_added:+.4f}"
+            )
+
+        # 记录移除的边类型效果
+        for edge_type in removed_edges:
+            if edge_type not in self.edge_contributions:
+                self.edge_contributions[edge_type] = EdgeTypeContribution(edge_type=edge_type)
+            self.edge_contributions[edge_type].record_removal(metric_delta, current_metric)
+            logger.debug(
+                f"Edge {edge_type} removed: delta={metric_delta:+.4f}, "
+                f"avg_when_removed={self.edge_contributions[edge_type].avg_delta_when_removed:+.4f}"
+            )
+
+        # 更新最佳指标时的 max_neighbors
+        if max_neighbors and (
+            self._best_metric_strategy_neighbors is None or
+            current_metric > self._prev_metric
+        ):
+            self._best_metric_strategy_neighbors = max_neighbors
+
+        # 更新状态
+        self._prev_edge_types = curr_set
+        self._prev_metric = current_metric
+
+    def get_edge_contribution_summary(self) -> str:
+        """
+        生成边类型贡献摘要供 Bio-CoT 使用
+
+        格式化输出各边类型的边际贡献，帮助 Actor 识别噪声边类型。
+
+        Returns:
+            str: 格式化的边类型贡献摘要
+        """
+        if not self.edge_contributions:
+            return ""
+
+        lines = ["## EDGE TYPE ABLATION HISTORY (Marginal Contributions)"]
+        lines.append("Based on historical experiments, here's how each edge type affected performance:")
+        lines.append("")
+
+        # 按净贡献排序
+        sorted_contributions = sorted(
+            self.edge_contributions.values(),
+            key=lambda x: x.get_net_contribution(),
+            reverse=True
+        )
+
+        for contrib in sorted_contributions:
+            # 只显示有足够样本的边类型
+            total_samples = contrib.times_added + contrib.times_removed
+            if total_samples < 2:
+                continue
+
+            classification = self._classify_edge_type(contrib)
+            net_contrib = contrib.get_net_contribution()
+
+            lines.append(
+                f"- **{contrib.edge_type}**: "
+                f"added={contrib.avg_delta_when_added:+.4f} (n={contrib.times_added}), "
+                f"removed={contrib.avg_delta_when_removed:+.4f} (n={contrib.times_removed}) "
+                f"-> **{classification}** (net={net_contrib:+.4f})"
+            )
+
+        if len(lines) <= 2:
+            return ""
+
+        # 添加解读指南
+        lines.append("")
+        lines.append("**Interpretation Guide:**")
+        lines.append("- BENEFICIAL: Adding improves performance, removing hurts - KEEP this edge type")
+        lines.append("- LIKELY NOISE: Adding hurts performance, removing helps - CONSIDER REMOVING")
+        lines.append("- NEUTRAL: No clear pattern - experiment further")
+
+        return "\n".join(lines)
+
+    def _classify_edge_type(self, contrib: EdgeTypeContribution) -> str:
+        """
+        将边类型分类为 BENEFICIAL / LIKELY NOISE / NEUTRAL
+
+        分类逻辑：
+        - BENEFICIAL: 添加时指标提升，移除时指标下降
+        - LIKELY NOISE: 添加时指标下降，移除时指标提升
+        - NEUTRAL: 效果不明显或矛盾
+
+        Args:
+            contrib: EdgeTypeContribution 实例
+
+        Returns:
+            str: 分类标签
+        """
+        add_effect = contrib.avg_delta_when_added
+        remove_effect = contrib.avg_delta_when_removed
+
+        # 添加有益（>1%）且移除有害（<0）
+        if add_effect > 0.01 and remove_effect < 0:
+            return "BENEFICIAL"
+
+        # 添加有害（<-1%）且移除有益（>0）
+        if add_effect < -0.01 and remove_effect > 0:
+            return "LIKELY NOISE"
+
+        # 添加有害但移除也有害或无效
+        if add_effect < -0.01:
+            return "POSSIBLY NOISE"
+
+        # 添加有益但移除也有益（矛盾）
+        if add_effect > 0.01 and remove_effect > 0:
+            return "UNCERTAIN"
+
+        # 效果都很小
+        if abs(add_effect) < 0.005 and abs(remove_effect) < 0.005:
+            return "NEUTRAL"
+
+        return "UNCERTAIN"
+
+    def get_noisy_edge_types(self, threshold: float = -0.01) -> List[str]:
+        """
+        获取可能是噪声的边类型列表
+
+        Args:
+            threshold: 净贡献低于此值认为是噪声
+
+        Returns:
+            List[str]: 噪声边类型列表
+        """
+        noisy = []
+        for edge_type, contrib in self.edge_contributions.items():
+            if contrib.times_added + contrib.times_removed < 2:
+                continue
+            if contrib.get_net_contribution() < threshold:
+                noisy.append(edge_type)
+        return noisy
+
+    def get_beneficial_edge_types(self, threshold: float = 0.01) -> List[str]:
+        """
+        获取有益的边类型列表
+
+        Args:
+            threshold: 净贡献高于此值认为是有益
+
+        Returns:
+            List[str]: 有益边类型列表
+        """
+        beneficial = []
+        for edge_type, contrib in self.edge_contributions.items():
+            if contrib.times_added + contrib.times_removed < 2:
+                continue
+            if contrib.get_net_contribution() > threshold:
+                beneficial.append(edge_type)
+        return beneficial
+
+    def should_prune_context(self, current_max_neighbors: int) -> bool:
+        """
+        判断是否应该进入 PRUNE 模式
+
+        条件：当前 max_neighbors 超过最佳指标时的 1.5 倍
+
+        Args:
+            current_max_neighbors: 当前策略的 max_neighbors
+
+        Returns:
+            bool: 是否应该剪枝
+        """
+        if self._best_metric_strategy_neighbors is None:
+            return False
+        return current_max_neighbors > self._best_metric_strategy_neighbors * 1.5

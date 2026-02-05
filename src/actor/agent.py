@@ -346,6 +346,7 @@ class ActorAgent:
     THINKING_MODE_FINE_TUNE = "FINE_TUNE"
     THINKING_MODE_HIGH_ENTROPY = "HIGH_ENTROPY"
     THINKING_MODE_ANALYZE_AND_PIVOT = "ANALYZE_AND_PIVOT"
+    THINKING_MODE_PRUNE = "PRUNE"  # 新增：噪声剪枝模式
 
     def __init__(
         self,
@@ -690,7 +691,8 @@ class ActorAgent:
         strategy_dict: Optional[Dict[str, Any]] = None,
         trend_analysis: Optional[Dict[str, Any]] = None,
         kgbook_suggestions: Optional[str] = None,
-        edge_effects: Optional[Dict[str, Dict]] = None
+        edge_effects: Optional[Dict[str, Dict]] = None,
+        neighbor_stats: Optional[Any] = None,
     ):
         """
         科学家模式的策略更新 (Scientist-style Policy Update)
@@ -706,6 +708,7 @@ class ActorAgent:
             trend_analysis: 趋势分析
             kgbook_suggestions: KGBOOK 建议
             edge_effects: 边类型效果
+            neighbor_stats: 当前迭代的邻居统计信息 (IterationNeighborStats)
         """
         # Check for baseline iteration
         is_baseline = strategy_dict.get('is_baseline', False) if strategy_dict else False
@@ -815,7 +818,8 @@ class ActorAgent:
         reward_signal: RewardSignal,
         strategy_dict: Optional[Dict[str, Any]] = None,
         trend_analysis: Optional[Dict[str, Any]] = None,
-        edge_effects: Optional[Dict[str, Dict]] = None
+        edge_effects: Optional[Dict[str, Dict]] = None,
+        neighbor_stats: Optional[Any] = None,
     ):
         """
         Bio-CoT 模式的策略更新 (Bio-CoT Policy Update)
@@ -830,6 +834,7 @@ class ActorAgent:
             strategy_dict: 完整策略字典
             trend_analysis: 趋势分析
             edge_effects: 边类型效果
+            neighbor_stats: 当前迭代的邻居统计信息 (IterationNeighborStats)
         """
         # Check for baseline iteration
         is_baseline = strategy_dict.get('is_baseline', False) if strategy_dict else False
@@ -910,8 +915,48 @@ class ActorAgent:
         hypothesis_ledger_summary = self.hypothesis_ledger.get_knowledge_summary()
         failure_patterns = self.hypothesis_ledger.get_failure_patterns()
 
+        # 8.5. 记录边类型贡献并获取摘要 (Edge Type Contribution Tracking)
+        current_edge_types = self.current_strategy.to_dict().get('edge_types', [])
+        current_max_neighbors = self.current_strategy.to_dict().get('max_neighbors', 50)
+        self.hypothesis_ledger.record_edge_contribution(
+            current_edge_types=current_edge_types,
+            current_metric=reward_signal.raw_metric,
+            iteration=current_iteration,
+            max_neighbors=current_max_neighbors,
+        )
+        edge_contribution_history = self.hypothesis_ledger.get_edge_contribution_summary()
+
         # 9. 获取思维模式约束 (已在顶部导入)
         mode_constraints = MODE_CONSTRAINTS.get(thinking_mode, "")
+
+        # 9.5. 格式化邻居统计信息 (Format neighbor stats for prompt)
+        current_neighbor_stats_str = ""
+        if neighbor_stats:
+            try:
+                from ..generator import format_neighbor_stats_for_actor
+                current_neighbor_stats_str = format_neighbor_stats_for_actor(neighbor_stats)
+                logger.info(
+                    f"Neighbor stats included in prompt: "
+                    f"{neighbor_stats.total_neighbors} neighbors, "
+                    f"{len(neighbor_stats.high_frequency_neighbors)} high-freq"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to format neighbor stats: {e}")
+
+        # 9.6. 格式化边类型权重信息 (Format edge weights for Actor decision making)
+        edge_weights_info = ""
+        if edge_effects:
+            try:
+                from .prompts import format_edge_weights_for_actor
+                # 从 edge_effects 提取权重信息
+                edge_weights = {k: v.get('weight', 0.5) for k, v in edge_effects.items()}
+                edge_weights_info = format_edge_weights_for_actor(edge_weights, edge_effects)
+                logger.info(
+                    f"Edge weights included in prompt: "
+                    f"{len(edge_weights)} edge types with weights"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to format edge weights: {e}")
 
         # 10. 生成 Bio-CoT Prompt
         strategy_summary = format_strategy_summary(self.current_strategy.to_dict())
@@ -928,6 +973,9 @@ class ActorAgent:
             hypothesis_ledger_summary=hypothesis_ledger_summary,
             failure_patterns=failure_patterns,
             mode_constraints=mode_constraints,
+            edge_contribution_history=edge_contribution_history,
+            current_neighbor_stats=current_neighbor_stats_str,
+            edge_weights_info=edge_weights_info,
         )
 
         # 11. LLM 反思 (Bio-CoT reasoning)
@@ -1115,12 +1163,19 @@ class ActorAgent:
         """
         根据 RewardSignal 状态确定思维模式
 
+        优先检测 PRUNE 模式（上下文增长但性能停滞）
+
         Args:
             reward_signal: 结构化奖励信号
 
         Returns:
-            str: 思维模式 (FINE_TUNE / HIGH_ENTROPY / ANALYZE_AND_PIVOT)
+            str: 思维模式 (FINE_TUNE / HIGH_ENTROPY / ANALYZE_AND_PIVOT / PRUNE)
         """
+        # 优先检测 PRUNE 模式
+        if self._should_enter_prune_mode(reward_signal):
+            logger.info("PRUNE mode triggered: context growth without improvement detected")
+            return self.THINKING_MODE_PRUNE
+
         if reward_signal.state == ExperimentState.BREAKTHROUGH:
             return self.THINKING_MODE_FINE_TUNE
         elif reward_signal.state == ExperimentState.STAGNATION:
@@ -1131,6 +1186,79 @@ class ActorAgent:
             # 未知状态，默认使用分析转向模式
             logger.warning(f"Unknown experiment state: {reward_signal.state}, defaulting to ANALYZE_AND_PIVOT")
             return self.THINKING_MODE_ANALYZE_AND_PIVOT
+
+    def _should_enter_prune_mode(self, reward_signal: RewardSignal) -> bool:
+        """
+        检测是否应进入 PRUNE 模式
+
+        PRUNE 模式触发条件：
+        1. 至少有 3 次实验历史
+        2. 最近 3 次实验中 max_neighbors 增长超过 20%
+        3. 最近 3 次实验中指标没有显著改善（< 2%）
+        4. 或者 HypothesisLedger 检测到上下文过度膨胀
+
+        Args:
+            reward_signal: 结构化奖励信号
+
+        Returns:
+            bool: 是否应进入 PRUNE 模式
+        """
+        # 突破时不进入 PRUNE 模式
+        if reward_signal.state == ExperimentState.BREAKTHROUGH:
+            return False
+
+        # 需要至少 3 次实验历史
+        if len(self.experiment_history) < 3:
+            return False
+
+        recent = self.experiment_history[-3:]
+
+        # 获取 max_neighbors 趋势
+        neighbors = [e.strategy.get('max_neighbors', 50) for e in recent]
+        first_neighbors = neighbors[0]
+        last_neighbors = neighbors[-1]
+
+        # 检测 max_neighbors 是否增长超过 20%
+        neighbors_grew = last_neighbors > first_neighbors * 1.2
+
+        # 获取指标趋势
+        metrics = [
+            e.reward_signal.raw_metric if e.reward_signal else 0
+            for e in recent
+        ]
+        first_metric = metrics[0]
+        max_metric = max(metrics)
+
+        # 检测指标是否停滞（最高指标相对首次指标提升不足 2%）
+        no_improvement = max_metric <= first_metric * 1.02
+
+        # 条件1：上下文增长但无改善
+        if neighbors_grew and no_improvement:
+            logger.debug(
+                f"PRUNE condition met: neighbors {first_neighbors}->{last_neighbors} "
+                f"(+{(last_neighbors/first_neighbors - 1)*100:.1f}%), "
+                f"metrics {first_metric:.4f}->{max_metric:.4f}"
+            )
+            return True
+
+        # 条件2：通过 HypothesisLedger 检测上下文过度膨胀
+        current_neighbors = self.current_strategy.to_dict().get('max_neighbors', 50)
+        if self.hypothesis_ledger.should_prune_context(current_neighbors):
+            logger.debug(
+                f"PRUNE condition met: current max_neighbors={current_neighbors} "
+                f"exceeds 1.5x best_metric_neighbors"
+            )
+            return True
+
+        # 条件3：检测到多个噪声边类型
+        noisy_edges = self.hypothesis_ledger.get_noisy_edge_types()
+        if len(noisy_edges) >= 2 and no_improvement:
+            logger.debug(
+                f"PRUNE condition met: {len(noisy_edges)} noisy edge types detected: {noisy_edges}"
+            )
+            return True
+
+        return False
 
     def _parse_scientist_response(
         self,
@@ -1190,6 +1318,8 @@ class ActorAgent:
         Returns:
             Strategy: 验证后的策略（可能被调整）
         """
+        import random
+
         proposed_dict = proposed_strategy.to_dict()
         current_dict = self.current_strategy.to_dict()
 
@@ -1219,6 +1349,28 @@ class ActorAgent:
                 if abs(proposed_neighbors - current_neighbors) < 30:
                     new_neighbors = min(200, max(10, current_neighbors + 40))
                     proposed_strategy.update(max_neighbors=new_neighbors)
+
+                # 强制改变边类型 (新增)
+                current_edge_types = set(current_dict.get('edge_types', []))
+                proposed_edge_types = set(proposed_dict.get('edge_types', []))
+
+                if current_edge_types == proposed_edge_types:
+                    # 边类型没变，强制添加/移除一个
+                    all_edge_types = {'PPI', 'GO', 'HPO', 'TRRUST', 'Reactome', 'CellMarker'}
+                    unused_types = all_edge_types - current_edge_types
+
+                    if unused_types and len(current_edge_types) < 5:
+                        # 随机添加一个未使用的边类型
+                        new_type = random.choice(list(unused_types))
+                        new_edge_types = list(current_edge_types) + [new_type]
+                        proposed_strategy.update(edge_types=new_edge_types)
+                        logger.info(f"HIGH_ENTROPY: Forced addition of edge type: {new_type}")
+                    elif len(current_edge_types) > 2:
+                        # 随机移除一个边类型（保留至少2个）
+                        remove_type = random.choice(list(current_edge_types))
+                        new_edge_types = [t for t in current_edge_types if t != remove_type]
+                        proposed_strategy.update(edge_types=new_edge_types)
+                        logger.info(f"HIGH_ENTROPY: Forced removal of edge type: {remove_type}")
 
                 logger.info("Forced larger changes for HIGH_ENTROPY mode")
 

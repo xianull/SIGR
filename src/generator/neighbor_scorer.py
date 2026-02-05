@@ -75,18 +75,27 @@ class NeighborScorer:
     2. Task relevance (overlap with task genes)
     3. Semantic similarity (embedding distance)
     4. Historical effectiveness (from Memory)
+
+    改进：增加 Hub 惩罚机制
+    - 高度数节点（Hub）往往是噪声源，除非它们与任务直接相关
+    - 通过惩罚高度数非任务相关节点来提高信噪比
     """
 
-    # Scoring dimension weights
+    # Scoring dimension weights (调整后的权重)
     DIMENSION_WEIGHTS = {
-        'structural': 0.25,
-        'task_relevance': 0.30,
+        'structural': 0.20,      # 从 0.25 降低，减少对纯拓扑特征的依赖
+        'task_relevance': 0.35,  # 从 0.30 提高，强调任务相关性
         'semantic': 0.25,
         'memory': 0.20,
     }
 
     # Structural scoring parameters
     MAX_DEGREE_NORMALIZATION = 500  # Degrees above this are capped at 1.0
+
+    # Hub 惩罚参数 (Hub Penalty Parameters)
+    HUB_THRESHOLD = 100  # 度数超过此值的节点被视为 Hub
+    HUB_PENALTY_SCALE = 0.3  # 最大 Hub 惩罚系数
+    HUB_EXCESS_NORMALIZATION = 400  # 用于归一化超出部分的度数
 
     def __init__(
         self,
@@ -156,9 +165,9 @@ class NeighborScorer:
             center_embedding = embeddings[center_gene]
 
         for neighbor_id, edge_type, direction in neighbors:
-            # 1. Structural score
+            # 1. Structural score (with hub penalty)
             structural = self._compute_structural_score(
-                center_gene, neighbor_id, edge_type
+                center_gene, neighbor_id, edge_type, task_genes
             )
 
             # 2. Task relevance score
@@ -217,19 +226,22 @@ class NeighborScorer:
         center_gene: str,
         neighbor_id: str,
         edge_type: str,
+        task_genes: Optional[Set[str]] = None,
     ) -> float:
         """
-        Compute structural score based on graph topology.
+        Compute structural score based on graph topology with Hub penalty.
 
         Components:
         - Neighbor degree (higher degree = more connected = potentially hub)
         - Edge type importance (some edge types are more informative)
         - Local clustering coefficient
+        - Hub penalty (high-degree non-task-relevant nodes are penalized)
 
         Args:
             center_gene: Center gene ID
             neighbor_id: Neighbor gene ID
             edge_type: Type of connecting edge
+            task_genes: Set of task-relevant genes (for hub penalty exemption)
 
         Returns:
             Structural score in [0, 1]
@@ -244,7 +256,24 @@ class NeighborScorer:
             1.0
         )
 
-        # 2. Edge type importance (some edges are more reliable)
+        # 2. Hub penalty: High-degree nodes that are NOT task-relevant get penalized
+        hub_penalty = 0.0
+        if neighbor_degree > self.HUB_THRESHOLD:
+            # Check if this hub is task-relevant (exempt from penalty)
+            is_task_relevant = task_genes and neighbor_id in task_genes
+
+            if not is_task_relevant:
+                # Penalty increases with degree beyond threshold
+                excess_degree = neighbor_degree - self.HUB_THRESHOLD
+                normalized_excess = min(excess_degree / self.HUB_EXCESS_NORMALIZATION, 1.0)
+                hub_penalty = self.HUB_PENALTY_SCALE * normalized_excess
+
+                logger.debug(
+                    f"Hub penalty for {neighbor_id}: degree={neighbor_degree}, "
+                    f"excess={excess_degree}, penalty={hub_penalty:.3f}"
+                )
+
+        # 3. Edge type importance (some edges are more reliable)
         edge_importance = {
             'PPI': 0.7,      # Protein interactions - moderate importance
             'GO': 0.8,       # Gene Ontology - high importance
@@ -255,12 +284,13 @@ class NeighborScorer:
         }
         edge_score = edge_importance.get(edge_type, 0.5)
 
-        # 3. Local connectivity (does neighbor also connect to other neighbors?)
+        # 4. Local connectivity (does neighbor also connect to other neighbors?)
         # This is expensive, so we use a simplified heuristic
         local_score = 0.5  # Placeholder - could be computed if needed
 
-        # Weighted combination
-        score = 0.4 * degree_score + 0.4 * edge_score + 0.2 * local_score
+        # 5. Weighted combination with hub penalty
+        raw_score = 0.4 * degree_score + 0.4 * edge_score + 0.2 * local_score
+        score = max(0.0, raw_score - hub_penalty)
 
         return float(np.clip(score, 0.0, 1.0))
 

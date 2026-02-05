@@ -664,11 +664,18 @@ class RewardComputer:
     EXPLORATION_LAMBDA = 0.15     # λ for exploration cost weight (探索代价权重)
     STAGNATION_THRESHOLD = 0.2    # Strategy distance below this = "lazy" (停滞阈值)
 
+    # 上下文噪声惩罚参数 (Context Noise Penalty Parameters)
+    CONTEXT_NOISE_LAMBDA = 0.10   # 上下文噪声惩罚权重
+    CONTEXT_GROWTH_THRESHOLD = 0.20  # 触发惩罚的上下文增长阈值 (20%)
+    METRIC_IMPROVEMENT_THRESHOLD = 0.005  # 指标改善阈值 (0.5%)
+
     def compute_signal(
         self,
         current_metric: float,
         history: Optional[List[float]] = None,
-        strategy_distance: float = 0.0
+        strategy_distance: float = 0.0,
+        current_strategy: Optional[Dict[str, Any]] = None,
+        prev_strategy: Optional[Dict[str, Any]] = None,
     ) -> RewardSignal:
         """
         科学发现范式的奖励计算 (Scientific Discovery Reward Computation)
@@ -676,7 +683,8 @@ class RewardComputer:
         公式:
         - R_utility = tanh((current - best) / σ)
         - R_cost = λ * (1 - strategy_distance) 仅在失败时应用
-        - Total = R_utility (突破) 或 R_utility - R_cost (失败)
+        - R_context_penalty = 上下文增长但指标停滞时的惩罚
+        - Total = R_utility (突破) 或 R_utility - R_cost - R_context_penalty (失败)
 
         状态分类:
         - BREAKTHROUGH: current_metric > best_metric
@@ -687,6 +695,8 @@ class RewardComputer:
             current_metric: 当前迭代的指标值 [0, 1]
             history: 历史指标列表（用于确定是否为第一次迭代）
             strategy_distance: 策略距离 [0, 1]，从 compute_strategy_distance() 获取
+            current_strategy: 当前策略字典 (用于计算上下文惩罚)
+            prev_strategy: 上一次策略字典 (用于计算上下文惩罚)
 
         Returns:
             RewardSignal: 结构化奖励信号，包含 feedback_message 用于 LLM prompt
@@ -732,11 +742,18 @@ class RewardComputer:
             # 探索失败但勇敢尝试，代价较低
             exploration_cost = self.EXPLORATION_LAMBDA * (1 - strategy_distance) * 0.5
 
+        # 3.5. 计算上下文噪声惩罚 (Context Noise Penalty)
+        context_penalty = self._compute_context_penalty(
+            current_strategy=current_strategy,
+            prev_strategy=prev_strategy,
+            metric_delta=metric_delta
+        )
+
         # 4. 计算总奖励 (Total Reward)
         if is_breakthrough:
             total_reward = utility_reward
         else:
-            total_reward = utility_reward - exploration_cost
+            total_reward = utility_reward - exploration_cost - context_penalty
 
         # Clip to [-1, 1]
         total_reward = float(np.clip(total_reward, -1.0, 1.0))
@@ -747,7 +764,8 @@ class RewardComputer:
             metric_delta=metric_delta,
             strategy_distance=strategy_distance,
             current_metric=current_metric,
-            best_metric=self._best_metric
+            best_metric=self._best_metric,
+            context_penalty=context_penalty,
         )
 
         # 6. 更新 best_metric（仅在突破时）
@@ -770,10 +788,61 @@ class RewardComputer:
         logger.info(
             f"RewardSignal: state={state.value}, total={total_reward:.4f}, "
             f"utility={utility_reward:.4f}, cost={exploration_cost:.4f}, "
+            f"context_penalty={context_penalty:.4f}, "
             f"distance={strategy_distance:.2f}, delta={metric_delta:+.4f}"
         )
 
         return signal
+
+    def _compute_context_penalty(
+        self,
+        current_strategy: Optional[Dict[str, Any]],
+        prev_strategy: Optional[Dict[str, Any]],
+        metric_delta: float,
+    ) -> float:
+        """
+        计算上下文噪声惩罚 (Context Noise Penalty)
+
+        如果 max_neighbors 增加但指标没有改善，应用惩罚。
+        实现奥卡姆剃刀原则：更简单的模型（更少上下文）在同等性能下更好。
+
+        Args:
+            current_strategy: 当前策略字典
+            prev_strategy: 上一次策略字典
+            metric_delta: 指标变化 (current - best)
+
+        Returns:
+            float: 上下文惩罚值 [0, max_penalty]
+        """
+        if current_strategy is None or prev_strategy is None:
+            return 0.0
+
+        curr_neighbors = current_strategy.get('max_neighbors', 50)
+        prev_neighbors = prev_strategy.get('max_neighbors', 50)
+
+        # 避免除零
+        if prev_neighbors == 0:
+            return 0.0
+
+        # 计算上下文增长比例
+        neighbor_increase_ratio = (curr_neighbors - prev_neighbors) / prev_neighbors
+
+        # 如果上下文增长超过阈值但指标没有显著改善，应用惩罚
+        if (neighbor_increase_ratio > self.CONTEXT_GROWTH_THRESHOLD and
+            metric_delta <= self.METRIC_IMPROVEMENT_THRESHOLD):
+            # 惩罚与上下文增长比例成正比
+            penalty = self.CONTEXT_NOISE_LAMBDA * neighbor_increase_ratio
+            # 设置惩罚上限
+            penalty = min(penalty, 0.15)
+
+            logger.debug(
+                f"Context penalty applied: neighbors {prev_neighbors}->{curr_neighbors} "
+                f"(+{neighbor_increase_ratio*100:.1f}%), metric_delta={metric_delta:+.4f}, "
+                f"penalty={penalty:.4f}"
+            )
+            return penalty
+
+        return 0.0
 
     def _generate_feedback_message(
         self,
@@ -781,7 +850,8 @@ class RewardComputer:
         metric_delta: float,
         strategy_distance: float,
         current_metric: float,
-        best_metric: float
+        best_metric: float,
+        context_penalty: float = 0.0,
     ) -> str:
         """
         生成人类可读的反馈消息，直接用于 LLM prompt
@@ -792,6 +862,7 @@ class RewardComputer:
             strategy_distance: 策略距离
             current_metric: 当前指标
             best_metric: 历史最佳指标
+            context_penalty: 上下文噪声惩罚值
 
         Returns:
             str: 反馈消息
@@ -804,16 +875,28 @@ class RewardComputer:
             )
         elif state == ExperimentState.STAGNATION:
             similarity = (1 - strategy_distance) * 100
-            return (
+            msg = (
                 f"STAGNATION WARNING: You are repeating similar experiments without progress.\n"
                 f"- Strategy similarity: {similarity:.0f}% (distance={strategy_distance:.2f})\n"
                 f"- Current metric: {current_metric:.4f}, Best: {best_metric:.4f} (gap: {metric_delta:+.4f})\n"
                 f"- You MUST try significantly different parameters. Small tweaks are being penalized."
             )
+            if context_penalty > 0:
+                msg += (
+                    f"\n- CONTEXT PENALTY APPLIED: {context_penalty:.4f} "
+                    f"(max_neighbors increased without improvement - consider reducing context size)"
+                )
+            return msg
         else:  # EXPLORATION_FAILURE
-            return (
+            msg = (
                 f"Hypothesis invalidated. Your exploration did not yield improvement.\n"
                 f"- Strategy distance: {strategy_distance:.2f} (brave exploration acknowledged)\n"
                 f"- Current metric: {current_metric:.4f}, Best: {best_metric:.4f} (gap: {metric_delta:+.4f})\n"
                 f"- Analyze why this hypothesis failed and propose a different approach."
             )
+            if context_penalty > 0:
+                msg += (
+                    f"\n- CONTEXT PENALTY APPLIED: {context_penalty:.4f} "
+                    f"(max_neighbors increased without improvement - consider reducing context size)"
+                )
+            return msg
