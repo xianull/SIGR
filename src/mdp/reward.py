@@ -1,34 +1,39 @@
 """
 Reward Computation for SIGR MDP Framework
 
-核心设计原则：没有改进就是惩罚 (No improvement = Negative reward)
+科学发现范式 (Scientific Discovery Paradigm)
+==========================================
 
-采用条件分支逻辑代替线性加权：
-- IF current_metric > best_metric: 正向奖励（鼓励改进）
-- ELSE: 负向惩罚（强制探索）
+核心理念：Agent 是科学家，每次迭代是一次实验 (Experiment)
 
-关键机制：
-1. 门控绝对奖励 (Gated Absolute Reward)
-   - 只有改进时才全额发放 absolute_reward
-   - 没有改进时衰减 90%（考 90 分但上次也是 90 分 → 功劳几乎为零）
+设计原则：
+1. 效用势能 (Utility Potential): R_utility = tanh((metric_current - metric_best) / σ)
+   - 光滑连续函数，自动包含"没改进=负值"逻辑
+   - σ 控制敏感度（默认 0.05）
 
-2. 强制负向主导 (Negative Dominance)
-   - 没有改进时 Penalty 主导，确保 total_reward < -0.2
-   - 明确告诉 Agent "这是错误的状态，必须改变"
+2. 探索代价 (Exploration Cost): R_cost = λ * (1 - strategy_distance)
+   - 惩罚"无脑试错"（策略相似但没改进）
+   - 鼓励"勇敢探索"（策略变化大）
 
-3. 动态基准线 (Dynamic Baseline)
-   - 跟 best_metric 比，而不是 moving average
-   - 只有超越历史最佳才有正的 baseline_reward
+3. 实验状态 (Experiment State):
+   - BREAKTHROUGH: 突破历史最佳
+   - EXPLORATION_FAILURE: 勇敢探索但失败
+   - STAGNATION: 懒惰重复（策略相似+没改进）
+
+最终公式：
+- Total = R_utility (突破时)
+- Total = R_utility - R_cost (失败时)
 
 Theoretical basis:
+- Information gain / surprise in scientific discovery
 - Reward shaping (Ng et al., 1999)
-- RLHF relative comparisons (Christiano et al., 2017)
-- Exploration-exploitation trade-off via negative rewards
+- Exploration bonus via strategy novelty
 """
 
 import logging
-from dataclasses import dataclass
-from typing import List, Optional, Union
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import List, Optional, Union, Dict, Any
 
 import numpy as np
 
@@ -48,9 +53,69 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# Experiment State Enum (科学发现范式)
+# =============================================================================
+
+class ExperimentState(str, Enum):
+    """
+    实验结果状态 (Experiment Outcome State)
+
+    用于指导 Actor 的反思模式 (Thinking Mode)
+    """
+    BREAKTHROUGH = "BREAKTHROUGH"              # 突破：metric > best_metric
+    EXPLORATION_FAILURE = "EXPLORATION_FAILURE"  # 探索失败：策略变化大但没改进
+    STAGNATION = "STAGNATION"                  # 停滞：策略相似且没改进
+
+
+# =============================================================================
+# Reward Signal (结构化奖励信号)
+# =============================================================================
+
+@dataclass
+class RewardSignal:
+    """
+    结构化奖励信号，用于科学家风格的反馈 (Scientist-style feedback)
+
+    核心组件：
+    - utility_reward: 效用势能 R_utility = tanh((current - best) / σ)
+    - exploration_cost: 探索代价 R_cost = λ * (1 - distance)
+    - state: 实验状态 (BREAKTHROUGH / EXPLORATION_FAILURE / STAGNATION)
+    - feedback_message: 人类可读的反馈消息，直接用于 LLM prompt
+    """
+    total_reward: float              # 最终奖励 [-1, 1]
+    utility_reward: float            # R_utility = tanh((current - best) / σ)
+    exploration_cost: float          # R_cost = λ * (1 - strategy_distance)
+    state: ExperimentState           # 实验结果状态
+    strategy_distance: float         # 策略距离 [0, 1]
+    raw_metric: float               # 当前指标值
+    best_metric: float              # 历史最佳指标
+    metric_delta: float             # current - best
+    feedback_message: str           # 人类可读反馈（用于 LLM prompt）
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for logging."""
+        return {
+            'total_reward': self.total_reward,
+            'utility_reward': self.utility_reward,
+            'exploration_cost': self.exploration_cost,
+            'state': self.state.value,
+            'strategy_distance': self.strategy_distance,
+            'raw_metric': self.raw_metric,
+            'best_metric': self.best_metric,
+            'metric_delta': self.metric_delta,
+            'feedback_message': self.feedback_message,
+        }
+
+
+# =============================================================================
+# Legacy RewardResult (保持向后兼容)
+# =============================================================================
+
+
 @dataclass
 class RewardResult:
-    """Result of reward computation with breakdown."""
+    """Result of reward computation with breakdown (Legacy format for compatibility)."""
     total_reward: float  # Normalized to [-1, 1]
     relative_reward: float  # metric_t - metric_{t-1}, normalized
     baseline_reward: float  # metric_t - baseline, normalized
@@ -74,6 +139,32 @@ class RewardResult:
         if self.weights_used:
             result['weights_used'] = self.weights_used
         return result
+
+    @classmethod
+    def from_reward_signal(cls, signal: RewardSignal) -> 'RewardResult':
+        """
+        Convert new RewardSignal to legacy RewardResult for backward compatibility.
+
+        Args:
+            signal: New-style RewardSignal
+
+        Returns:
+            Legacy RewardResult for existing logging/integration
+        """
+        return cls(
+            total_reward=signal.total_reward,
+            relative_reward=signal.metric_delta,  # Map metric_delta to relative
+            baseline_reward=signal.utility_reward,  # Map utility to baseline
+            absolute_reward=signal.raw_metric,
+            plateau_penalty=-signal.exploration_cost,  # Map exploration cost as penalty
+            raw_metric=signal.raw_metric,
+            weights_used={
+                'utility_scale': 0.05,
+                'exploration_lambda': 0.15,
+                'state': signal.state.value,
+            },
+            plateau_duration=1 if signal.state == ExperimentState.STAGNATION else 0,
+        )
 
 
 class RewardComputer:
@@ -562,3 +653,155 @@ class RewardComputer:
             cumulative += (gamma ** i) * result.total_reward
 
         return cumulative
+
+    # =========================================================================
+    # 科学发现范式 (Scientific Discovery Paradigm) - New Methods
+    # =========================================================================
+
+    # 新范式参数 (New Paradigm Parameters)
+    UTILITY_SCALE = 0.05          # σ for tanh sensitivity (控制敏感度)
+    EXPLORATION_LAMBDA = 0.15     # λ for exploration cost weight (探索代价权重)
+    STAGNATION_THRESHOLD = 0.2    # Strategy distance below this = "lazy" (停滞阈值)
+
+    def compute_signal(
+        self,
+        current_metric: float,
+        history: Optional[List[float]] = None,
+        strategy_distance: float = 0.0
+    ) -> RewardSignal:
+        """
+        科学发现范式的奖励计算 (Scientific Discovery Reward Computation)
+
+        公式:
+        - R_utility = tanh((current - best) / σ)
+        - R_cost = λ * (1 - strategy_distance) 仅在失败时应用
+        - Total = R_utility (突破) 或 R_utility - R_cost (失败)
+
+        状态分类:
+        - BREAKTHROUGH: current_metric > best_metric
+        - STAGNATION: strategy_distance < threshold 且没有改进
+        - EXPLORATION_FAILURE: 其他情况（勇敢探索但失败）
+
+        Args:
+            current_metric: 当前迭代的指标值 [0, 1]
+            history: 历史指标列表（用于确定是否为第一次迭代）
+            strategy_distance: 策略距离 [0, 1]，从 compute_strategy_distance() 获取
+
+        Returns:
+            RewardSignal: 结构化奖励信号，包含 feedback_message 用于 LLM prompt
+        """
+        # 确定是否为第一次迭代
+        is_first_iteration = (history is None or len(history) == 0)
+
+        # 获取或初始化 best_metric
+        if self._best_metric is None:
+            self._best_metric = current_metric if is_first_iteration else max(history) if history else current_metric
+
+        # 计算指标差异
+        metric_delta = current_metric - self._best_metric
+
+        # 1. 效用势能 (Utility Potential)
+        # R_utility = tanh((current - best) / σ)
+        utility_reward = float(np.tanh(metric_delta / self.UTILITY_SCALE))
+
+        # 2. 判断是否为突破 (Breakthrough)
+        is_breakthrough = current_metric > self._best_metric
+
+        # 3. 确定实验状态 (Experiment State)
+        if is_breakthrough:
+            state = ExperimentState.BREAKTHROUGH
+            exploration_cost = 0.0  # 突破时不惩罚
+        elif strategy_distance < self.STAGNATION_THRESHOLD:
+            state = ExperimentState.STAGNATION
+            # 停滞时探索代价最高
+            exploration_cost = self.EXPLORATION_LAMBDA * (1 - strategy_distance)
+        else:
+            state = ExperimentState.EXPLORATION_FAILURE
+            # 探索失败但勇敢尝试，代价较低
+            exploration_cost = self.EXPLORATION_LAMBDA * (1 - strategy_distance) * 0.5
+
+        # 4. 计算总奖励 (Total Reward)
+        if is_breakthrough:
+            total_reward = utility_reward
+        else:
+            total_reward = utility_reward - exploration_cost
+
+        # Clip to [-1, 1]
+        total_reward = float(np.clip(total_reward, -1.0, 1.0))
+
+        # 5. 生成反馈消息 (Feedback Message for LLM)
+        feedback_message = self._generate_feedback_message(
+            state=state,
+            metric_delta=metric_delta,
+            strategy_distance=strategy_distance,
+            current_metric=current_metric,
+            best_metric=self._best_metric
+        )
+
+        # 6. 更新 best_metric（仅在突破时）
+        if is_breakthrough:
+            self._best_metric = current_metric
+
+        # 7. 构建 RewardSignal
+        signal = RewardSignal(
+            total_reward=total_reward,
+            utility_reward=utility_reward,
+            exploration_cost=exploration_cost,
+            state=state,
+            strategy_distance=strategy_distance,
+            raw_metric=current_metric,
+            best_metric=self._best_metric,
+            metric_delta=metric_delta,
+            feedback_message=feedback_message,
+        )
+
+        logger.info(
+            f"RewardSignal: state={state.value}, total={total_reward:.4f}, "
+            f"utility={utility_reward:.4f}, cost={exploration_cost:.4f}, "
+            f"distance={strategy_distance:.2f}, delta={metric_delta:+.4f}"
+        )
+
+        return signal
+
+    def _generate_feedback_message(
+        self,
+        state: ExperimentState,
+        metric_delta: float,
+        strategy_distance: float,
+        current_metric: float,
+        best_metric: float
+    ) -> str:
+        """
+        生成人类可读的反馈消息，直接用于 LLM prompt
+
+        Args:
+            state: 实验状态
+            metric_delta: 指标差异 (current - best)
+            strategy_distance: 策略距离
+            current_metric: 当前指标
+            best_metric: 历史最佳指标
+
+        Returns:
+            str: 反馈消息
+        """
+        if state == ExperimentState.BREAKTHROUGH:
+            return (
+                f"BREAKTHROUGH! Your hypothesis was validated.\n"
+                f"- Metric improved: {best_metric - metric_delta:.4f} → {current_metric:.4f} ({metric_delta:+.4f})\n"
+                f"- This is a new best! Analyze what made this strategy successful."
+            )
+        elif state == ExperimentState.STAGNATION:
+            similarity = (1 - strategy_distance) * 100
+            return (
+                f"STAGNATION WARNING: You are repeating similar experiments without progress.\n"
+                f"- Strategy similarity: {similarity:.0f}% (distance={strategy_distance:.2f})\n"
+                f"- Current metric: {current_metric:.4f}, Best: {best_metric:.4f} (gap: {metric_delta:+.4f})\n"
+                f"- You MUST try significantly different parameters. Small tweaks are being penalized."
+            )
+        else:  # EXPLORATION_FAILURE
+            return (
+                f"Hypothesis invalidated. Your exploration did not yield improvement.\n"
+                f"- Strategy distance: {strategy_distance:.2f} (brave exploration acknowledged)\n"
+                f"- Current metric: {current_metric:.4f}, Best: {best_metric:.4f} (gap: {metric_delta:+.4f})\n"
+                f"- Analyze why this hypothesis failed and propose a different approach."
+            )

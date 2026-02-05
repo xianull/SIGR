@@ -22,7 +22,7 @@ from .tasks.cell_task import CellTask
 from .tasks.perturbation_task import PerturbationTask
 from .classifiers import get_classifier, get_regressor, ClassifierFactory
 from .metrics import compute_clustering_metrics, compute_regression_metrics
-from ..mdp.reward import RewardComputer, RewardResult
+from ..mdp.reward import RewardComputer, RewardResult, RewardSignal
 
 # Import configurable reward weights
 try:
@@ -439,6 +439,28 @@ class TaskEvaluator:
         """
         current_metric = metrics.get(self.primary_metric, 0.0)
         return self.reward_computer.compute(current_metric, history)
+
+    def compute_reward_signal(
+        self,
+        metrics: Dict[str, float],
+        history: Optional[List[float]] = None,
+        strategy_distance: float = 0.0
+    ) -> RewardSignal:
+        """
+        计算科学发现范式的结构化奖励信号 (Scientist-style Reward Signal)
+
+        Args:
+            metrics: 评估指标字典
+            history: 历史指标列表
+            strategy_distance: 策略距离 [0, 1]
+
+        Returns:
+            RewardSignal: 结构化奖励信号
+        """
+        current_metric = metrics.get(self.primary_metric, 0.0)
+        return self.reward_computer.compute_signal(
+            current_metric, history, strategy_distance
+        )
 
     def generate_feedback(
         self,

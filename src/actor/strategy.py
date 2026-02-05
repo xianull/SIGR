@@ -639,3 +639,111 @@ def get_default_strategy(task_name: str) -> Strategy:
     )
 
     return Strategy(config)
+
+
+# =============================================================================
+# Strategy Distance Calculation (策略距离计算)
+# =============================================================================
+
+# Distance weights for different parameters
+DISTANCE_WEIGHTS = {
+    'edge_types': 0.30,       # Most important - determines KG structure
+    'max_neighbors': 0.20,    # Affects information density
+    'max_hops': 0.15,         # Affects graph depth
+    'sampling': 0.15,         # Affects selection strategy
+    'description_length': 0.10,  # Affects output verbosity
+    'other': 0.10,            # Combined smaller params
+}
+
+# Ordinal mappings for categorical parameters
+DESCRIPTION_LENGTH_ORDINAL = {'short': 0, 'medium': 1, 'long': 2}
+SAMPLING_ORDINAL = {'top_k': 0, 'random': 1, 'weighted': 2}
+
+
+def compute_strategy_distance(
+    strategy_curr: Dict[str, Any],
+    strategy_prev: Optional[Dict[str, Any]]
+) -> float:
+    """
+    计算两个策略之间的归一化距离 (Normalized distance between strategies)
+
+    用于科学发现范式中判断"勇敢探索"还是"懒惰重复"
+
+    计算组件:
+    - edge_types: Jaccard 距离 (集合差异)
+    - max_hops: |curr - prev| / 2 (按范围归一化)
+    - max_neighbors: |curr - prev| / 190 (范围 10-200)
+    - sampling: 1 如果不同, 0 如果相同
+    - description_length: 序数距离 / 2
+
+    Args:
+        strategy_curr: 当前策略字典
+        strategy_prev: 上一个策略字典（如果为 None，返回 1.0 表示完全新策略）
+
+    Returns:
+        float: 距离值 [0, 1]，其中 0 = 完全相同，1 = 最大差异
+    """
+    if strategy_prev is None:
+        return 1.0  # 第一次迭代，完全"新"策略
+
+    total_distance = 0.0
+
+    # 1. Edge types distance (Jaccard distance)
+    curr_edges = set(strategy_curr.get('edge_types', []))
+    prev_edges = set(strategy_prev.get('edge_types', []))
+
+    if curr_edges or prev_edges:
+        intersection = len(curr_edges & prev_edges)
+        union = len(curr_edges | prev_edges)
+        jaccard_distance = 1 - (intersection / union) if union > 0 else 0
+        total_distance += DISTANCE_WEIGHTS['edge_types'] * jaccard_distance
+
+    # 2. Max neighbors distance (normalized by range 10-200)
+    curr_neighbors = strategy_curr.get('max_neighbors', 50)
+    prev_neighbors = strategy_prev.get('max_neighbors', 50)
+    neighbors_distance = abs(curr_neighbors - prev_neighbors) / 190.0  # Range is 190 (10-200)
+    total_distance += DISTANCE_WEIGHTS['max_neighbors'] * min(neighbors_distance, 1.0)
+
+    # 3. Max hops distance (normalized by range 1-3)
+    curr_hops = strategy_curr.get('max_hops', 2)
+    prev_hops = strategy_prev.get('max_hops', 2)
+    hops_distance = abs(curr_hops - prev_hops) / 2.0  # Range is 2 (1-3)
+    total_distance += DISTANCE_WEIGHTS['max_hops'] * hops_distance
+
+    # 4. Sampling method distance (categorical)
+    curr_sampling = strategy_curr.get('sampling', 'top_k')
+    prev_sampling = strategy_prev.get('sampling', 'top_k')
+    if curr_sampling != prev_sampling:
+        # Ordinal distance for sampling
+        curr_ord = SAMPLING_ORDINAL.get(curr_sampling, 0)
+        prev_ord = SAMPLING_ORDINAL.get(prev_sampling, 0)
+        sampling_distance = abs(curr_ord - prev_ord) / 2.0
+    else:
+        sampling_distance = 0.0
+    total_distance += DISTANCE_WEIGHTS['sampling'] * sampling_distance
+
+    # 5. Description length distance (ordinal)
+    curr_length = strategy_curr.get('description_length', 'medium')
+    prev_length = strategy_prev.get('description_length', 'medium')
+    curr_ord = DESCRIPTION_LENGTH_ORDINAL.get(curr_length, 1)
+    prev_ord = DESCRIPTION_LENGTH_ORDINAL.get(prev_length, 1)
+    length_distance = abs(curr_ord - prev_ord) / 2.0  # Range is 2 (short to long)
+    total_distance += DISTANCE_WEIGHTS['description_length'] * length_distance
+
+    # 6. Other parameters (combined)
+    other_distance = 0.0
+    other_params = [
+        ('description_focus', 'balanced'),
+        ('context_window', 'full'),
+        ('prompt_style', 'analytical'),
+        ('feature_selection', 'all'),
+    ]
+    changed_count = sum(
+        1 for param, default in other_params
+        if strategy_curr.get(param, default) != strategy_prev.get(param, default)
+    )
+    other_distance = changed_count / len(other_params)
+    total_distance += DISTANCE_WEIGHTS['other'] * other_distance
+
+    # Ensure result is in [0, 1]
+    return min(max(total_distance, 0.0), 1.0)

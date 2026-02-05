@@ -11,7 +11,26 @@ Key design principles:
 4. EXPLICIT labels forbidden (is/is not sensitive, etc.)
 """
 
-from typing import Dict, List
+from typing import Dict, List, Any, Optional
+
+__all__ = [
+    # Constants
+    'TASK_EDGE_PRIORITIES',
+    'TASK_INITIAL_PROMPTS',
+    'TASK_IMPLICIT_SIGNALS',
+    'MODE_CONSTRAINTS',
+    'TASK_DIAGNOSIS_QUESTIONS',
+    # Functions
+    'get_reflection_prompt',
+    'get_prompt_optimization_prompt',
+    'get_self_critique_prompt',
+    'get_consistency_check_prompt',
+    'get_reflection_cot_prompt',
+    'get_scientist_reflection_prompt',
+    'get_biologist_reflection_prompt',
+    'get_bio_cot_prompt',
+    'format_strategy_summary',
+]
 
 
 # Task-specific edge type priorities
@@ -920,4 +939,613 @@ Reason: {trend_analysis.get('action_reason', 'N/A')}
         history=history_str,
         trend_analysis_section=trend_section,
         edge_effects_section=edge_effects_section
+    )
+
+
+# =============================================================================
+# 科学家风格的反思模板 (Scientist-style Reflection Templates)
+# =============================================================================
+
+SCIENTIST_REFLECTION_TEMPLATE = """You are the Chief Scientist at SIGR Laboratory.
+Your mission: Discover the optimal Gene Representation strategy through systematic experimentation.
+
+## SYSTEM STATE
+- Current Best Metric: {best_metric:.4f}
+- Last Experiment Result: **{state}**
+- Thinking Mode: **{thinking_mode}**
+- Strategy Distance: {strategy_distance:.2f}
+
+## EXPERIMENT FEEDBACK
+{feedback_message}
+
+## RECENT EXPERIMENT LOG
+{experiment_log}
+{edge_effects_section}
+{kgbook_section}
+## YOUR TASK
+
+### Step 1: ANALYZE (Root Cause Analysis)
+{analysis_instruction}
+
+### Step 2: HYPOTHESIZE (Scientific Hypothesis)
+Based on your analysis, formulate a NEW scientific hypothesis:
+- "I hypothesize that [specific change] will [expected effect] because [reasoning]"
+- Your hypothesis must be TESTABLE through parameter changes
+- Be specific about which parameters you will modify and why
+
+### Step 3: PLAN (Experiment Design)
+Convert your hypothesis into concrete parameters.
+
+Available parameters:
+- edge_types: PPI, GO, HPO, TRRUST, CellMarker, Reactome
+- sampling: top_k, random, weighted
+- max_hops: 1-3
+- max_neighbors: 10-200
+- description_length: short (50-100 words), medium (100-150 words), long (150-250 words)
+- description_focus: balanced, network, function, phenotype
+- context_window: minimal, local, extended, full
+- prompt_style: analytical, narrative, structured, comparative
+- feature_selection: all, essential, diverse, task_specific
+{trend_section}
+## CONSTRAINTS
+{mode_constraints}
+
+## OUTPUT FORMAT
+Provide your response as a JSON object:
+```json
+{{
+    "hypothesis": "Your scientific hypothesis in one sentence",
+    "expected_outcome": "What you expect to happen if hypothesis is correct",
+    "reasoning": "Why you believe this will work based on evidence",
+    "edge_types": [...],
+    "max_hops": int,
+    "sampling": "top_k" | "random" | "weighted",
+    "max_neighbors": int,
+    "description_length": "short" | "medium" | "long",
+    "description_focus": "balanced" | "network" | "function" | "phenotype",
+    "context_window": "minimal" | "local" | "extended" | "full",
+    "prompt_style": "analytical" | "narrative" | "structured" | "comparative",
+    "feature_selection": "all" | "essential" | "diverse" | "task_specific"
+}}
+```
+"""
+
+# Mode-specific constraints
+MODE_CONSTRAINTS = {
+    "FINE_TUNE": """
+You are in **FINE-TUNE** mode (after breakthrough).
+- Make SMALL adjustments only (< 20% parameter change)
+- Preserve the core elements that led to success
+- Goal: Consolidate and slightly improve the winning strategy
+- Do NOT change edge_types significantly
+- Do NOT make drastic changes to max_neighbors (±20 max)
+""",
+    "HIGH_ENTROPY": """
+You are in **HIGH-ENTROPY** mode (STAGNATION detected!).
+- You MUST make SIGNIFICANT changes (> 30% parameter difference)
+- DO NOT repeat the previous strategy or similar variations
+- Try completely different edge types, sampling methods, or description styles
+- This is MANDATORY - small changes will be REJECTED and penalized
+- Examples of significant changes:
+  * Switch from top_k to weighted sampling
+  * Add/remove multiple edge types
+  * Change max_neighbors by ±50 or more
+  * Switch description_focus entirely
+""",
+    "ANALYZE_AND_PIVOT": """
+You are in **ANALYZE-AND-PIVOT** mode (exploration failed).
+- Your previous hypothesis was invalidated
+- Identify what went wrong and propose a DIFFERENT approach
+- Avoid repeating the same mistake
+- Medium-level changes recommended (20-30% parameter difference)
+- Focus on why the hypothesis failed before proposing new one
+"""
+}
+
+# Analysis instructions per state
+ANALYSIS_INSTRUCTIONS = {
+    "BREAKTHROUGH": """
+Your last experiment was successful! Analyze:
+- What made this hypothesis work?
+- Which parameter changes contributed most to improvement?
+- What should be preserved in future experiments?
+""",
+    "EXPLORATION_FAILURE": """
+Your hypothesis was invalidated. Analyze:
+- Why did this specific approach fail?
+- Was the hypothesis fundamentally flawed or just the parameters?
+- What alternative direction should we explore?
+""",
+    "STAGNATION": """
+CRITICAL: You are stuck in a local optimum! Analyze:
+- Why are you repeating similar strategies?
+- What fundamental assumption might be wrong?
+- What completely different approach have you NOT tried yet?
+"""
+}
+
+
+def get_scientist_reflection_prompt(
+    thinking_mode: str,
+    reward_signal: 'RewardSignal',  # Forward reference
+    experiment_history: List[Dict],
+    task_name: str,
+    current_strategy: Dict,
+    best_metric: float = None,
+    trend_analysis: Dict = None,
+    edge_effects: Dict = None,
+    kgbook_suggestions: str = None,
+) -> str:
+    """
+    生成科学家风格的反思 prompt
+
+    Args:
+        thinking_mode: 思维模式 (FINE_TUNE / HIGH_ENTROPY / ANALYZE_AND_PIVOT)
+        reward_signal: 结构化奖励信号
+        experiment_history: 实验历史列表
+        task_name: 任务名称
+        current_strategy: 当前策略
+        best_metric: 历史最佳指标
+        trend_analysis: 趋势分析
+        edge_effects: 边类型效果
+        kgbook_suggestions: KGBOOK 建议
+
+    Returns:
+        str: 格式化的反思 prompt
+    """
+    # Format experiment log
+    experiment_log = ""
+    recent_experiments = experiment_history[-3:] if experiment_history else []
+    for exp in recent_experiments:
+        if hasattr(exp, 'to_experiment_report'):
+            experiment_log += exp.to_experiment_report() + "\n\n"
+        elif isinstance(exp, dict):
+            exp_signal = exp.get('reward_signal', {})
+            state = exp_signal.get('state', 'UNKNOWN') if exp_signal else 'UNKNOWN'
+            metric = exp_signal.get('raw_metric', 0) if exp_signal else 0
+            experiment_log += (
+                f"## Experiment {exp.get('iteration', '?')}\n"
+                f"**Hypothesis**: {exp.get('hypothesis', 'N/A')}\n"
+                f"**Result**: {state} (metric={metric:.4f})\n"
+                f"**Strategy**: edge_types={exp.get('strategy', {}).get('edge_types', [])}\n\n"
+            )
+
+    if not experiment_log:
+        experiment_log = "No previous experiments recorded."
+
+    # Get state and mode constraints
+    state = reward_signal.state.value if reward_signal else "UNKNOWN"
+    mode_constraints = MODE_CONSTRAINTS.get(thinking_mode, MODE_CONSTRAINTS["ANALYZE_AND_PIVOT"])
+    analysis_instruction = ANALYSIS_INSTRUCTIONS.get(state, ANALYSIS_INSTRUCTIONS["EXPLORATION_FAILURE"])
+
+    # Format trend section
+    trend_section = ""
+    if trend_analysis:
+        trend_section = f"""
+## TREND ANALYSIS
+- Direction: {trend_analysis.get('trend_direction', 'unknown')}
+- Strength: {trend_analysis.get('trend_strength', 0):.2f}
+- Suggested Action: {trend_analysis.get('suggested_action', 'explore')}
+"""
+
+    # Format edge effects section
+    edge_effects_section = ""
+    if edge_effects:
+        sorted_effects = sorted(
+            edge_effects.items(),
+            key=lambda x: x[1].get('ema_effect', 0),
+            reverse=True
+        )
+        effects_lines = []
+        for edge_type, effect in sorted_effects:
+            usage = effect.get('usage_count', 0)
+            success = effect.get('success_count', 0)
+            success_rate = success / max(usage, 1)
+            ema = effect.get('ema_effect', 0)
+            effects_lines.append(
+                f"  - {edge_type}: usage={usage}, success_rate={success_rate:.0%}, ema_effect={ema:+.4f}"
+            )
+        edge_effects_section = "\n## LEARNED EDGE EFFECTIVENESS (from Memory)\n" + "\n".join(effects_lines) + "\n"
+
+    # Format kgbook suggestions
+    kgbook_section = ""
+    if kgbook_suggestions:
+        kgbook_section = f"\n## KNOWLEDGE BASE SUGGESTIONS\n{kgbook_suggestions}\n"
+
+    return SCIENTIST_REFLECTION_TEMPLATE.format(
+        best_metric=best_metric or 0.0,
+        state=state,
+        thinking_mode=thinking_mode,
+        strategy_distance=reward_signal.strategy_distance if reward_signal else 0.0,
+        feedback_message=reward_signal.feedback_message if reward_signal else "No feedback available.",
+        experiment_log=experiment_log,
+        edge_effects_section=edge_effects_section,
+        kgbook_section=kgbook_section,
+        analysis_instruction=analysis_instruction,
+        trend_section=trend_section,
+        mode_constraints=mode_constraints,
+    )
+
+
+# =============================================================================
+# 计算生物学家 Prompt (Computational Biologist Prompt)
+# =============================================================================
+
+BIO_SCIENTIST_PROMPT = """You are a Computational Biologist at the SIGR Laboratory.
+Your mission: Discover optimal gene representation strategies through BIOLOGICAL REASONING.
+
+## TASK CONTEXT: {task_name}
+{task_biological_context}
+
+## DOMAIN KNOWLEDGE
+{domain_knowledge}
+
+## SYSTEM STATE
+- Current Best Metric: {best_metric:.4f}
+- Last Experiment Result: **{state}**
+- Thinking Mode: **{thinking_mode}**
+
+## EXPERIMENT FEEDBACK
+{feedback_message}
+
+## HISTORICAL FACTS
+{historical_facts}
+
+{failure_patterns}
+
+## YOUR ANALYSIS FRAMEWORK
+
+### 1. BIOLOGICAL DIAGNOSIS
+Analyze the last result from a BIOLOGICAL perspective:
+- What biological mechanism might explain this outcome?
+- How does the knowledge graph structure relate to the task?
+- What signal-to-noise considerations apply?
+- Think about WHY certain edge types work, not just IF they work
+
+### 2. HYPOTHESIS FORMULATION
+Propose a testable biological hypothesis:
+"I hypothesize that [biological mechanism] will improve performance because [biological reasoning]"
+
+Example hypotheses:
+- "Reducing neighborhood size will improve cell type prediction because cell identity is defined by few marker genes, not the entire interactome"
+- "Prioritizing HPO edges will improve dosage sensitivity prediction because haploinsufficient genes have specific phenotypic associations"
+- "Switching to weighted sampling will better capture the heterogeneous importance of different interaction types"
+
+### 3. EXPERIMENT DESIGN
+Translate your hypothesis into parameters:
+
+Available parameters:
+- edge_types: PPI, GO, HPO, TRRUST, CellMarker, Reactome
+- sampling: top_k, random, weighted
+- max_hops: 1-3
+- max_neighbors: 10-200
+- description_length: short, medium, long
+- description_focus: balanced, network, function, phenotype
+- context_window: minimal, local, extended, full
+- prompt_style: analytical, narrative, structured, comparative
+- feature_selection: all, essential, diverse, task_specific
+
+## CONSTRAINTS
+{mode_constraints}
+
+## OUTPUT FORMAT
+Provide your response as a JSON object:
+```json
+{{{{
+    "biological_diagnosis": "Your biological analysis of why the last experiment succeeded/failed",
+    "hypothesis": "Your biological hypothesis",
+    "expected_mechanism": "How this will work biologically",
+    "edge_types": [...],
+    "max_hops": int,
+    "sampling": "top_k" | "random" | "weighted",
+    "max_neighbors": int,
+    "description_length": "short" | "medium" | "long",
+    "description_focus": "balanced" | "network" | "function" | "phenotype",
+    "context_window": "minimal" | "local" | "extended" | "full",
+    "prompt_style": "analytical" | "narrative" | "structured" | "comparative",
+    "feature_selection": "all" | "essential" | "diverse" | "task_specific"
+}}}}
+```
+"""
+
+
+def get_biologist_reflection_prompt(
+    thinking_mode: str,
+    reward_signal: 'RewardSignal',
+    task_name: str,
+    current_strategy: Dict,
+    task_biological_context: str,
+    domain_knowledge: str,
+    historical_facts: str,
+    failure_patterns: str = "",
+    best_metric: float = None,
+) -> str:
+    """
+    生成计算生物学家风格的反思 prompt
+
+    核心改变：
+    1. 不注入 UCB 建议
+    2. 注入生物学背景知识
+    3. 要求生物学层面的诊断和假设
+
+    Args:
+        thinking_mode: 思维模式
+        reward_signal: 结构化奖励信号
+        task_name: 任务名称
+        current_strategy: 当前策略
+        task_biological_context: 任务特定的生物学背景
+        domain_knowledge: 通用领域知识
+        historical_facts: 历史事实（非建议）
+        failure_patterns: 失败模式分析
+        best_metric: 历史最佳指标
+
+    Returns:
+        str: 格式化的反思 prompt
+    """
+    # Get state and mode constraints
+    state = reward_signal.state.value if reward_signal else "UNKNOWN"
+    mode_constraints = MODE_CONSTRAINTS.get(thinking_mode, MODE_CONSTRAINTS["ANALYZE_AND_PIVOT"])
+
+    return BIO_SCIENTIST_PROMPT.format(
+        task_name=task_name,
+        task_biological_context=task_biological_context,
+        domain_knowledge=domain_knowledge,
+        best_metric=best_metric or 0.0,
+        state=state,
+        thinking_mode=thinking_mode,
+        feedback_message=reward_signal.feedback_message if reward_signal else "No feedback available.",
+        historical_facts=historical_facts,
+        failure_patterns=failure_patterns,
+        mode_constraints=mode_constraints,
+    )
+
+
+# =============================================================================
+# Bio-CoT Prompt：强制生物学思维链推理
+# =============================================================================
+
+# 任务特定的诊断问题 (Task-Specific Diagnosis Questions)
+TASK_DIAGNOSIS_QUESTIONS = {
+    'cell': """
+- Is cell identity being captured by the current edge types?
+- Are marker genes (CellMarker) being prioritized over generic protein interactions?
+- Is the neighborhood size appropriate for marker-defined cell identity?
+- Are tissue-specific expression patterns being captured?
+""",
+
+    'geneattribute_dosage_sensitivity': """
+- Are hub genes (haploinsufficient) being properly represented?
+- Is regulatory network position captured through TRRUST edges?
+- Are phenotype associations (HPO) being leveraged for dosage effects?
+- Is evolutionary constraint information being captured (pLI, LOEUF context)?
+""",
+
+    'geneattribute_bivalent': """
+- Are developmental and pluripotency-related annotations captured?
+- Is Polycomb (PRC2) regulatory context being represented?
+- Are lineage commitment genes being distinguished?
+- Is the balance between active (H3K4me3) and repressive (H3K27me3) marks reflected?
+""",
+
+    'geneattribute_lys4_only': """
+- Are active promoter characteristics being captured?
+- Is housekeeping gene context being represented?
+- Are constitutive expression patterns reflected in the representation?
+""",
+
+    'geneattribute_no_methylation': """
+- Are CpG island associations being captured?
+- Is promoter accessibility context being represented?
+- Are open chromatin characteristics reflected?
+""",
+
+    'ppi': """
+- Are protein localization constraints being captured?
+- Is functional similarity (GO) complementing physical interaction evidence?
+- Are interaction partners being properly contextualized within pathways?
+- Is hub protein bias being addressed?
+""",
+
+    'ggi': """
+- Are genetic interaction patterns (epistasis) being captured?
+- Is functional redundancy between paralogs being represented?
+- Are shared pathway memberships being leveraged?
+""",
+
+    'genetype': """
+- Are molecular function annotations (GO) being properly weighted?
+- Is enzyme/receptor/transporter classification information being captured?
+- Are catalytic domain features being represented?
+""",
+
+    'perturbation': """
+- Are regulatory cascade effects (TRRUST) being captured?
+- Is signal propagation through the network being modeled?
+- Are direct vs. indirect effects being distinguished?
+""",
+}
+
+
+BIO_COT_PROMPT = """You are a Computational Biologist conducting systematic scientific experiments.
+Your goal is NOT to tune parameters, but to discover biological mechanisms.
+
+## SCIENTIFIC METHOD FRAMEWORK
+
+You MUST follow this exact reasoning chain. Do NOT skip steps.
+
+### STEP 1: OBSERVATION (What happened?)
+State the experimental facts objectively:
+- Previous metric: {prev_metric}
+- Current metric: {curr_metric}
+- Change: {delta} ({experiment_state})
+- Strategy used: {strategy_summary}
+
+### STEP 2: BIOLOGICAL DIAGNOSIS (Why did this happen?)
+Analyze from a BIOLOGICAL perspective. Think about:
+{task_diagnosis_questions}
+
+Key questions:
+- What biological mechanism might explain this outcome?
+- How does the knowledge graph structure relate to the task?
+- What signal-to-noise considerations apply?
+
+### STEP 3: HYPOTHESIS FORMULATION (What should we try?)
+Based on your diagnosis, propose a TESTABLE biological hypothesis.
+
+Format: "I hypothesize that [biological mechanism] will [expected effect] because [biological reasoning]"
+
+Your hypothesis MUST be:
+- **BIOLOGICAL**: About mechanisms, not parameters (BAD: "increase max_neighbors", GOOD: "focus on marker genes")
+- **TESTABLE**: Can be validated/falsified by the next experiment
+- **FALSIFIABLE**: Has clear failure criteria
+
+### STEP 4: EXPERIMENT DESIGN (How do we test it?)
+ONLY NOW translate your biological hypothesis into experimental parameters.
+Each parameter choice MUST logically follow from your hypothesis.
+
+Explain the connection:
+- Hypothesis: "cell identity is marker-defined" → edge_types=['CellMarker', 'GO'] (because markers directly define identity)
+- Hypothesis: "fewer genes define cell type" → max_neighbors=20 (because cell identity is sparse, not dense)
+
+Available parameters:
+- edge_types: PPI, GO, HPO, TRRUST, CellMarker, Reactome
+- sampling: top_k (prioritize strongest), random (explore), weighted (balance)
+- max_hops: 1-3 (network depth)
+- max_neighbors: 10-200 (receptive field size)
+- description_length: short (50-100 words), medium (100-150), long (150-250)
+- description_focus: balanced, network (hub/centrality), function (pathways), phenotype (disease)
+- context_window: minimal (direct), local (1-hop), extended (2-hop), full
+- prompt_style: analytical, narrative, structured, comparative
+- feature_selection: all, essential (core only), diverse (maximize variety), task_specific
+
+### STEP 5: FALSIFICATION CRITERIA (How will we know if we're wrong?)
+Define clear conditions that would invalidate your hypothesis:
+- If metric < X, then the hypothesis about [Y] is wrong
+- If [specific pattern], then the biological assumption about [Z] was incorrect
+
+## TASK CONTEXT: {task_name}
+{task_biological_context}
+
+## HYPOTHESIS LEDGER (Your accumulated scientific knowledge)
+{hypothesis_ledger_summary}
+
+{failure_patterns}
+
+## CONSTRAINTS
+{mode_constraints}
+
+## OUTPUT FORMAT
+Provide your response as a JSON object. The structure MUST match exactly:
+
+```json
+{{{{
+    "observation": {{{{
+        "previous_metric": <float>,
+        "current_metric": <float>,
+        "delta": <float>,
+        "state": "<BREAKTHROUGH|EXPLORATION_FAILURE|STAGNATION>"
+    }}}},
+    "biological_diagnosis": "<Your biological analysis of why this happened>",
+    "hypothesis": {{{{
+        "statement": "<I hypothesize that...>",
+        "biological_basis": "<The biological mechanism is...>",
+        "expected_outcome": "<This should result in...>"
+    }}}},
+    "experiment_design": {{{{
+        "rationale": "<How parameters derive from hypothesis>",
+        "edge_types": [<list of edge types>],
+        "max_hops": <int>,
+        "sampling": "<top_k|random|weighted>",
+        "max_neighbors": <int>,
+        "description_length": "<short|medium|long>",
+        "description_focus": "<balanced|network|function|phenotype>",
+        "context_window": "<minimal|local|extended|full>",
+        "prompt_style": "<analytical|narrative|structured|comparative>",
+        "feature_selection": "<all|essential|diverse|task_specific>"
+    }}}},
+    "falsification_criteria": "<If..., then hypothesis is wrong>"
+}}}}
+```
+"""
+
+
+def get_bio_cot_prompt(
+    task_name: str,
+    task_biological_context: str,
+    prev_metric: float,
+    curr_metric: float,
+    experiment_state: str,
+    strategy_summary: str,
+    hypothesis_ledger_summary: str,
+    failure_patterns: str = "",
+    mode_constraints: str = "",
+) -> str:
+    """
+    生成 Bio-CoT (Biological Chain of Thought) Prompt
+
+    这个 prompt 强制 Actor 按照科学方法进行推理：
+    Observation → Diagnosis → Hypothesis → Design → Falsification
+
+    Args:
+        task_name: 任务名称
+        task_biological_context: 任务特定的生物学背景
+        prev_metric: 上一次实验的指标
+        curr_metric: 当前实验的指标
+        experiment_state: 实验状态 (BREAKTHROUGH/EXPLORATION_FAILURE/STAGNATION)
+        strategy_summary: 当前策略摘要
+        hypothesis_ledger_summary: 假设账本摘要
+        failure_patterns: 失败模式分析
+        mode_constraints: 思维模式约束
+
+    Returns:
+        str: 格式化的 Bio-CoT prompt
+    """
+    # 获取任务特定的诊断问题
+    task_diagnosis_questions = TASK_DIAGNOSIS_QUESTIONS.get(
+        task_name,
+        "- What biological mechanisms are relevant to this task?\n- What signal sources should be prioritized?"
+    )
+
+    # 计算 delta
+    delta = curr_metric - prev_metric if prev_metric else curr_metric
+    delta_str = f"{delta:+.4f}" if prev_metric else "N/A (first experiment)"
+
+    # 格式化指标
+    prev_metric_str = f"{prev_metric:.4f}" if prev_metric else "N/A"
+    curr_metric_str = f"{curr_metric:.4f}"
+
+    return BIO_COT_PROMPT.format(
+        task_name=task_name,
+        task_biological_context=task_biological_context,
+        prev_metric=prev_metric_str,
+        curr_metric=curr_metric_str,
+        delta=delta_str,
+        experiment_state=experiment_state,
+        strategy_summary=strategy_summary,
+        task_diagnosis_questions=task_diagnosis_questions,
+        hypothesis_ledger_summary=hypothesis_ledger_summary,
+        failure_patterns=failure_patterns,
+        mode_constraints=mode_constraints,
+    )
+
+
+def format_strategy_summary(strategy: Dict) -> str:
+    """
+    格式化策略摘要
+
+    Args:
+        strategy: 策略字典
+
+    Returns:
+        str: 人类可读的策略摘要
+    """
+    edge_types = strategy.get('edge_types', [])
+    max_neighbors = strategy.get('max_neighbors', 50)
+    sampling = strategy.get('sampling', 'top_k')
+    max_hops = strategy.get('max_hops', 2)
+    desc_length = strategy.get('description_length', 'medium')
+
+    return (
+        f"edge_types={edge_types}, max_neighbors={max_neighbors}, "
+        f"sampling={sampling}, max_hops={max_hops}, description_length={desc_length}"
     )

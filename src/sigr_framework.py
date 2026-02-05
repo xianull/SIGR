@@ -16,12 +16,14 @@ import numpy as np
 import networkx as nx
 
 from .actor import ActorAgent
+from .actor.strategy import compute_strategy_distance
 from .generator import extract_subgraph, TextGenerator, MockTextGenerator
 from .encoder import GeneEncoder
 from .evaluator import TaskEvaluator
 from .utils import load_kg, get_all_genes
 from .utils.logger import SIGRLogger, setup_logging
 from .mdp import MDPState, TrendAnalyzer, ExplorationScheduler
+from .mdp.reward import RewardResult, RewardSignal
 from .kgbook import get_memory, Memory
 
 
@@ -76,7 +78,8 @@ class SIGRFramework:
         enable_adaptive_reward: bool = False,
         enable_self_critique: bool = True,
         enable_consistency_check: bool = True,
-        enable_cot_reasoning: bool = True
+        enable_cot_reasoning: bool = True,
+        enable_scientist_mode: bool = True,  # 新增：启用科学家模式
     ):
         """
         Initialize the SIGR framework.
@@ -94,6 +97,7 @@ class SIGRFramework:
             enable_self_critique: Enable Actor self-critique (default: True)
             enable_consistency_check: Enable strategy consistency check (default: True)
             enable_cot_reasoning: Enable Chain-of-Thought reasoning (default: True)
+            enable_scientist_mode: Enable scientist discovery paradigm (default: True)
         """
         # Validate task name
         if task_name not in AVAILABLE_TASKS:
@@ -118,13 +122,15 @@ class SIGRFramework:
         logger.info(f"Found {len(self.all_genes)} genes")
 
         # Initialize components
+        self.enable_scientist_mode = enable_scientist_mode
         self.actor = ActorAgent(
             llm_client,
             task_name,
             enable_self_critique=enable_self_critique,
             enable_consistency_check=enable_consistency_check,
             enable_cot_reasoning=enable_cot_reasoning,
-            enable_critic=True  # Enable Critic for Actor-Critic architecture
+            enable_critic=True,  # Enable Critic for Actor-Critic architecture
+            enable_scientist_mode=enable_scientist_mode  # 新增
         )
         self.generator = TextGenerator(llm_client)
         self.encoder = GeneEncoder()
@@ -555,6 +561,25 @@ class SIGRFramework:
             f"raw={reward_result.raw_metric:.4f}"
         )
 
+        # 科学家模式：计算策略距离并生成 RewardSignal
+        reward_signal = None
+        if self.enable_scientist_mode:
+            # 计算策略距离
+            last_strategy = self.actor.get_last_strategy()
+            strategy_distance = compute_strategy_distance(strategy, last_strategy)
+            logger.info(f"Strategy distance from previous: {strategy_distance:.2f}")
+
+            # 生成结构化奖励信号
+            reward_signal = self.evaluator.compute_reward_signal(
+                metrics, history=history, strategy_distance=strategy_distance
+            )
+            logger.info(
+                f"RewardSignal: state={reward_signal.state.value}, "
+                f"utility={reward_signal.utility_reward:.4f}, "
+                f"cost={reward_signal.exploration_cost:.4f}, "
+                f"total={reward_signal.total_reward:.4f}"
+            )
+
         # Update adaptive reward weights if enabled
         if self.enable_adaptive_reward and trend_analysis:
             trend_direction = trend_analysis.get('trend_direction', 'unknown')
@@ -645,15 +670,27 @@ class SIGRFramework:
         task_edge_effects = self.memory.data.get("task_edge_effects", {}).get(self.task_name, {})
 
         # Actor reflects and updates policy
-        self.actor.update_policy(
-            reward,
-            feedback,
-            raw_metric=reward_result.raw_metric,
-            strategy_dict=strategy,  # Pass full strategy dict (includes is_baseline)
-            trend_analysis=trend_analysis,
-            kgbook_suggestions=memory_suggestions,
-            edge_effects=task_edge_effects
-        )
+        # 科学家模式使用新的 update_policy_scientist 方法
+        if self.enable_scientist_mode and reward_signal is not None:
+            logger.info(f"Using scientist mode with thinking mode based on state: {reward_signal.state.value}")
+            self.actor.update_policy_scientist(
+                reward_signal=reward_signal,
+                strategy_dict=strategy,
+                trend_analysis=trend_analysis,
+                kgbook_suggestions=memory_suggestions,
+                edge_effects=task_edge_effects
+            )
+        else:
+            # Legacy mode
+            self.actor.update_policy(
+                reward,
+                feedback,
+                raw_metric=reward_result.raw_metric,
+                strategy_dict=strategy,  # Pass full strategy dict (includes is_baseline)
+                trend_analysis=trend_analysis,
+                kgbook_suggestions=memory_suggestions,
+                edge_effects=task_edge_effects
+            )
 
         # Log reflection and self-critique
         self.logger.log_reflection(self.actor.get_last_reflection())
@@ -661,8 +698,8 @@ class SIGRFramework:
         if critique:
             self.logger.log_critique(critique)
 
-        # Log reward breakdown
-        self.logger.log_reward_breakdown({
+        # Log reward breakdown (include scientist mode fields if available)
+        reward_breakdown = {
             'total_reward': reward_result.total_reward,
             'relative_reward': reward_result.relative_reward,
             'baseline_reward': reward_result.baseline_reward,
@@ -671,7 +708,17 @@ class SIGRFramework:
             'raw_metric': reward_result.raw_metric,
             'plateau_duration': reward_result.plateau_duration,
             'weights_used': reward_result.weights_used,
-        })
+        }
+        if reward_signal is not None:
+            reward_breakdown.update({
+                'scientist_mode': True,
+                'state': reward_signal.state.value,
+                'utility_reward': reward_signal.utility_reward,
+                'exploration_cost': reward_signal.exploration_cost,
+                'strategy_distance': reward_signal.strategy_distance,
+                'thinking_mode': self.actor.get_last_thinking_mode(),
+            })
+        self.logger.log_reward_breakdown(reward_breakdown)
 
         # Log critic advantage if available
         last_advantage = self.actor.get_last_advantage()
