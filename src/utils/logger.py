@@ -51,9 +51,29 @@ class SIGRLogger:
         # Summary tracking
         self.summary: List[Dict[str, Any]] = []
 
+        # 设置控制台日志同时输出到文件
+        self.console_log_file = self.log_dir / "console.log"
+        self._setup_file_logging()
+
         logger.info(f"SIGRLogger initialized for task: {task_name}")
         logger.info(f"Run ID: {self.run_id}")
         logger.info(f"Log directory: {self.log_dir}")
+        logger.info(f"Console logs saved to: {self.console_log_file}")
+
+    def _setup_file_logging(self):
+        """配置 Python logging 同时输出到控制台和文件"""
+        root_logger = logging.getLogger()
+
+        # 添加文件 handler，将所有日志同时写入文件
+        file_handler = logging.FileHandler(self.console_log_file, mode='a', encoding='utf-8')
+        file_handler.setLevel(logging.DEBUG)  # 文件记录所有级别
+        file_handler.setFormatter(
+            logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        )
+        root_logger.addHandler(file_handler)
+
+        # 保存 handler 引用，以便后续清理
+        self._file_handler = file_handler
 
     def log_baseline(self, metrics: Dict[str, float]):
         """
@@ -318,3 +338,9 @@ def setup_logging(
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=handlers
     )
+
+    # 抑制 httpx/httpcore 的 INFO 日志，避免干扰 tqdm 进度条
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    # 抑制 openai 库的 HTTP 重试日志
+    logging.getLogger("openai._base_client").setLevel(logging.WARNING)

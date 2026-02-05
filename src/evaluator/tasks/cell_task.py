@@ -202,7 +202,11 @@ class CellTask(BaseTask):
         self._label_encoder = LabelEncoder()
         y_encoded = self._label_encoder.fit_transform(y_list)
 
-        X = np.vstack(X_list)
+        # Stack embeddings (ensure 2D array even for single sample)
+        if len(X_list) == 1:
+            X = X_list[0].reshape(1, -1)
+        else:
+            X = np.vstack(X_list)
         y = np.array(y_encoded)
 
         logger.info(f"Cell task: {len(X)} cells, "

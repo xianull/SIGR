@@ -222,9 +222,9 @@ class ExplorationScheduler:
         mean_reward = self.strategy_rewards[key] / n
 
         # UCB1 exploration bonus: c * sqrt(ln(t) / n)
-        exploration_bonus = self.ucb_coefficient * math.sqrt(
-            math.log(self.total_visits) / n
-        )
+        # Note: log(1) = 0, which is mathematically correct but gives zero bonus
+        log_visits = math.log(max(self.total_visits, 2))  # 确保至少有正的探索奖励
+        exploration_bonus = self.ucb_coefficient * math.sqrt(log_visits / n)
 
         ucb_value = mean_reward + exploration_bonus
 
@@ -242,9 +242,7 @@ class ExplorationScheduler:
                 break
 
             other_mean = self.strategy_rewards[other_key] / other_n
-            other_bonus = self.ucb_coefficient * math.sqrt(
-                math.log(self.total_visits) / other_n
-            )
+            other_bonus = self.ucb_coefficient * math.sqrt(log_visits / other_n)
             other_ucb = other_mean + other_bonus
 
             if other_ucb > best_ucb:
@@ -450,15 +448,14 @@ class ExplorationScheduler:
             return {}
 
         ucb_values = {}
+        log_visits = math.log(max(self.total_visits, 2))  # 确保至少有正的探索奖励
         for key in self.strategy_counts:
             n = self.strategy_counts[key]
             if n == 0:
                 ucb_values[key] = float('inf')
             else:
                 mean = self.strategy_rewards.get(key, 0) / n
-                bonus = self.ucb_coefficient * math.sqrt(
-                    math.log(self.total_visits) / n
-                )
+                bonus = self.ucb_coefficient * math.sqrt(log_visits / n)
                 ucb_values[key] = mean + bonus
 
         return ucb_values

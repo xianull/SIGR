@@ -864,7 +864,7 @@ CONSTRAINTS:
 
                 # Generate description with strategy parameters
                 # Return both filtered and original
-                filtered_desc, raw_desc = self.generator.generate(
+                result = self.generator.generate(
                     gene_id=gene_id,
                     subgraph=subgraph,
                     prompt_template=strategy.get('prompt_template', ''),
@@ -872,8 +872,16 @@ CONSTRAINTS:
                     strategy=strategy,
                     return_both=True
                 )
+
+                # Handle both tuple and single string returns
+                if isinstance(result, tuple):
+                    filtered_desc, raw_desc = result
+                else:
+                    filtered_desc = raw_desc = result
+
                 return (gene_id, filtered_desc, raw_desc, None)
             except Exception as e:
+                logger.debug(f"Error generating description for {gene_id}: {e}")
                 return (gene_id, None, None, str(e))
 
         # Use ThreadPoolExecutor for concurrent LLM requests

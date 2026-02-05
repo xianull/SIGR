@@ -125,7 +125,12 @@ class PPITask(BaseTask):
             X_negative.append(feature)
 
         # Combine
-        X = np.vstack(X_positive + X_negative)
+        combined = X_positive + X_negative
+        if not combined:
+            logger.warning("No samples available for PPI task")
+            return np.array([]), np.array([])
+
+        X = np.vstack(combined)
         y = np.array([1] * len(X_positive) + [0] * len(X_negative))
 
         logger.info(f"PPI task: {len(positive_pairs)} positive, {len(negative_pairs)} negative pairs")

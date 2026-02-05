@@ -101,8 +101,9 @@ class MDPState:
         self.current_strategy = deepcopy(strategy)
         self.iteration += 1
 
-        # Update best if improved
-        if metric > self.best_metric:
+        # Update best if improved (use tolerance for float comparison)
+        FLOAT_TOLERANCE = 1e-10
+        if metric > self.best_metric + FLOAT_TOLERANCE:
             self.best_metric = metric
             self.best_strategy = deepcopy(strategy)
             self.best_iteration = self.iteration  # 1-based, consistent with main loop

@@ -170,7 +170,9 @@ class TrendAnalyzer:
         # Linear regression for trend
         slope, intercept = np.polyfit(x, recent, 1)
         residuals = recent - (slope * x + intercept)
-        r_squared = 1 - (np.var(residuals) / (np.var(recent) + 1e-10))
+        # Use np.maximum for better numerical stability
+        var_recent = np.var(recent)
+        r_squared = 1 - (np.var(residuals) / np.maximum(var_recent, 1e-10))
         # Clamp R² to valid range [0, 1]
         r_squared = max(0.0, min(1.0, r_squared))
 
@@ -180,8 +182,8 @@ class TrendAnalyzer:
         if len(recent) >= 4:
             differences = np.diff(recent)
             sign_changes = np.sum(np.diff(np.sign(differences)) != 0)
-            # Fix: use max(1, ...) to avoid division by zero
-            oscillation_ratio = sign_changes / max(1, len(differences) - 1)
+            # Fix: use len(differences) as denominator for correct ratio calculation
+            oscillation_ratio = sign_changes / max(1, len(differences))
         else:
             oscillation_ratio = 0
 

@@ -5,7 +5,7 @@ Uses LLM to convert KG subgraphs into natural language gene descriptions.
 """
 
 import logging
-from typing import Dict, Any, Optional, Protocol, List, Tuple
+from typing import Dict, Any, Optional, Protocol, List, Tuple, Union
 
 import networkx as nx
 
@@ -98,7 +98,7 @@ class TextGenerator:
         kg: Optional[nx.DiGraph] = None,
         strategy: Optional[Dict[str, Any]] = None,
         return_both: bool = False
-    ) -> str | Tuple[str, str]:
+    ) -> Union[str, Tuple[str, str]]:
         """
         Generate a description for a gene based on its subgraph.
 
@@ -559,8 +559,10 @@ class MockTextGenerator:
         gene_id: str,
         subgraph: nx.DiGraph,
         prompt_template: str,
-        kg: Optional[nx.DiGraph] = None
-    ) -> str:
+        kg: Optional[nx.DiGraph] = None,
+        strategy: Optional[Dict[str, Any]] = None,
+        return_both: bool = False
+    ) -> Union[str, Tuple[str, str]]:
         """Generate mock description."""
         # Get basic info from subgraph
         num_nodes = subgraph.number_of_nodes()
@@ -589,6 +591,8 @@ class MockTextGenerator:
         description = ' '.join(description_parts) + '.'
         description += f" [Subgraph: {num_nodes} nodes, {num_edges} edges]"
 
+        if return_both:
+            return description, description  # filtered and raw are same for mock
         return description
 
     def generate_batch(

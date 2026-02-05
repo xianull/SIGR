@@ -531,7 +531,8 @@ class RewardComputer:
             # 强制负向主导：计算 no_improvement_penalty
             improvement_gap = self._best_metric - current_metric
             no_improvement_penalty = self.NO_IMPROVEMENT_BASE - improvement_gap * self.NO_IMPROVEMENT_GAP_SCALE
-            no_improvement_penalty = max(no_improvement_penalty, self.NO_IMPROVEMENT_MAX_PENALTY)
+            # 限制惩罚在 [MAX_PENALTY, 0] 范围内（MAX_PENALTY 是负数）
+            no_improvement_penalty = float(np.clip(no_improvement_penalty, self.NO_IMPROVEMENT_MAX_PENALTY, 0.0))
 
             logger.debug(
                 f"No improvement: best={self._best_metric:.4f}, current={current_metric:.4f}, "
@@ -695,7 +696,17 @@ class RewardComputer:
 
         # 获取或初始化 best_metric
         if self._best_metric is None:
-            self._best_metric = current_metric if is_first_iteration else max(history) if history else current_metric
+            if is_first_iteration:
+                self._best_metric = current_metric
+            elif history:
+                self._best_metric = max(history)
+            else:
+                # 逻辑矛盾：不是第一次迭代但没有历史
+                logger.warning(
+                    "Inconsistent state: not first iteration but no history. "
+                    "Using current_metric as baseline."
+                )
+                self._best_metric = current_metric
 
         # 计算指标差异
         metric_delta = current_metric - self._best_metric
@@ -787,7 +798,7 @@ class RewardComputer:
         if state == ExperimentState.BREAKTHROUGH:
             return (
                 f"BREAKTHROUGH! Your hypothesis was validated.\n"
-                f"- Metric improved: {best_metric - metric_delta:.4f} → {current_metric:.4f} ({metric_delta:+.4f})\n"
+                f"- Metric improved: {best_metric:.4f} → {current_metric:.4f} ({metric_delta:+.4f})\n"
                 f"- This is a new best! Analyze what made this strategy successful."
             )
         elif state == ExperimentState.STAGNATION:

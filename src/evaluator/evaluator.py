@@ -334,7 +334,16 @@ class TaskEvaluator:
 
         # Predictions
         y_pred = clf.predict(X_test)
-        y_prob = clf.predict_proba(X_test)
+        try:
+            y_prob = clf.predict_proba(X_test)
+        except AttributeError:
+            # Some classifiers don't have predict_proba
+            logger.warning(f"Classifier {self.classifier_type} does not support predict_proba")
+            return {
+                'accuracy': accuracy_score(y_test, y_pred),
+                'f1': f1_score(y_test, y_pred, average='macro', zero_division=0),
+                'auc': 0.5,
+            }
 
         # Compute metrics
         metrics = {

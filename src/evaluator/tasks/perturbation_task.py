@@ -210,7 +210,9 @@ class PerturbationTask(BaseTask):
 
         if not X_list:
             logger.warning(f"No genes matched! Conditions: {self.conditions[:5]}...")
-            return np.array([]), np.array([])
+            # Return empty arrays with proper dimensions
+            emb_dim = next(iter(embeddings.values())).shape[0] if embeddings else 0
+            return np.array([]).reshape(0, emb_dim), np.array([]).reshape(0, self.n_genes)
 
         X = np.vstack(X_list)
         Y = np.vstack(Y_list)
